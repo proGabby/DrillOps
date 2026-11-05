@@ -43,5 +43,260 @@
     "answer": "1. **Root Cause:**\n- **Liveness Probe Misuse:** The liveness probe was checking application responsiveness or performing heavy health checks under load. When CPU saturated, the probe timed out, triggering Kubernetes to kill healthy (but overloaded) pods. Terminating pods during high load concentrates even more traffic onto the surviving pods, causing instantaneous domino failure.\n\n2. **Probe Distinction:**\n- **Liveness Probe:** \"Is the process deadlocked or corrupt?\" (e.g. fatal infinite loop, unhandled panic). If it fails, restart the container. Should be a lightweight in-memory check (e.g. basic HTTP 200 without DB queries).\n- **Readiness Probe:** \"Can this container accept user traffic right now?\" If it fails, remove the pod from Service endpoints/load balancers **without killing it**, allowing it to drain and cool down.\n\n3. **Load Shedding Pattern:**\nUnder extreme load, the service must shed excess traffic early with `HTTP 429 Too Many Requests` or `HTTP 503` rather than queuing requests until memory exhausts:\n- Use adaptive concurrency limits (e.g. Netflix Concurrency Limits / TCP Vegas algorithm).\n- Reject low-priority background traffic (e.g. analytics, batch sync) while prioritizing critical paths (checkout, payments).",
     "pitfalls": "Putting database `SELECT 1` or external API checks in Kubernetes Liveness probes. If your DB stutters, Kubernetes will kill all application pods across your entire fleet at once.",
     "key_takeaway": "Liveness probes should only restart deadlocked processes, never overloaded ones. Protect services with adaptive load shedding, not pod restarts."
+  },
+  {
+    "id": "sre-004",
+    "title": "Circuit Breakers: Closed, Open, Half-Open States & Failure Windows",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A core microservice calls a downstream third-party SMS verification provider. When the SMS provider suffers an outage and starts timing out at 30 seconds per request, all worker threads in the core microservice become blocked waiting for timeouts, causing all other unrelated features on the platform to crash.",
+    "question": "How does the Circuit Breaker pattern isolate downstream failures, what are the exact transition triggers between Closed, Open, and Half-Open states, and how do you prevent thundering herd when testing recovery?",
+    "hints": [
+      "In the Open state, calls fail fast immediately without making network requests.",
+      "The Half-Open state allows a small percentage of canary requests to test downstream health."
+    ],
+    "answer": "1. **The Three Circuit Breaker States:**\n- **Closed (Normal):** Requests pass through to the downstream service. The circuit breaker monitors success and failure rates in a rolling sliding window (e.g. last 100 requests or last 10 seconds).\n- **Open (Tripped / Failing Fast):** If the failure rate exceeds a threshold (e.g. >50% errors or timeouts), the breaker trips to **Open**.\n  - All subsequent calls **fail immediately** (returning a cached response, fallback, or `HTTP 503 Service Unavailable`) without attempting any network I/O.\n  - Protects the caller's thread pool and gives the downstream service breathing room to recover.\n- **Half-Open (Testing Recovery):** After a configurable sleep timeout (e.g. 30 seconds), the circuit transitions to **Half-Open**.\n  - Allows a small, limited number of \"canary\" requests (e.g. 5 requests) to pass through to the downstream provider.\n  - If all canaries succeed: The circuit resets to **Closed**.\n  - If any canary fails: The circuit trips immediately back to **Open** for another sleep interval.\n\n2. **Fallback Integration:** Combine circuit breakers with static fallbacks (e.g. serving cached recommendations or queuing SMS for delayed delivery).",
+    "pitfalls": "Configuring circuit breakers based on raw failure count instead of failure percentage in high-throughput services. 10 errors out of 100,000 requests should never trip a breaker.",
+    "key_takeaway": "Use Circuit Breakers to fail fast when downstream dependencies degrade, protecting upstream thread pools from timeout exhaustion."
+  },
+  {
+    "id": "sre-005",
+    "title": "Retry Storms & Exponential Backoff with Full Jitter",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A primary database stutters for 500 milliseconds. 5,000 client instances experience a transient timeout. All 5,000 clients immediately retry 1 second later at the exact same instant, doubling traffic to 10,000 requests. The database is crushed, fails again, and all clients retry again at 2 seconds, turning a 500ms blip into a 2-hour global outage.",
+    "question": "What is a Retry Storm, why does basic exponential backoff without jitter worsen traffic synchronization, and what is the mathematical formula for AWS 'Full Jitter' backoff?",
+    "hints": [
+      "Without jitter, all clients back off to the exact same future second, creating periodic synchronized spikes.",
+      "Full Jitter chooses a random sleep duration uniformly distributed between 0 and the exponential cap."
+    ],
+    "answer": "1. **The Flaw with Deterministic Backoff:**\nIf retry delay is deterministic (e.g. $t = \\text{base} \\times 2^{\\text{attempt}}$), every client that failed at time $T$ will retry at $T + 1\\text{s}$, then $T + 3\\text{s}$, then $T + 7\\text{s}$. This synchronizes client requests into massive periodic waves that overwhelm the recovering service over and over.\n\n2. **AWS Full Jitter Formula:**\nInstead of sleeping for the calculated exponential delay, randomize uniformly between 0 and the current backoff ceiling:\n$$\\text{Sleep} = \\text{random}(0, \\min(\\text{Cap}, \\text{Base} \\times 2^{\\text{attempt}}))$$\n\n3. **Operational Safeguards:**\n- **Retry Budgets:** Enforce that retries cannot exceed 10% of total outgoing request volume. If retry budget is exhausted, fail fast without retrying.\n- **Only Retry Idempotent & Transient Errors:** Never retry on HTTP 4xx (client errors) or non-idempotent POSTs unless backed by idempotency keys.",
+    "pitfalls": "Blindly retrying on non-transient errors (like HTTP 400 Bad Request or 401 Unauthorized), which burns CPU without any possibility of success.",
+    "key_takeaway": "Always add Full Jitter to exponential backoffs and enforce a strict 10% retry budget to eliminate synchronized retry storms."
+  },
+  {
+    "id": "sre-006",
+    "title": "Bulkheading: Thread Pool & Queue Isolation to Contain Blast Radius",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A monolithic backend handles both user checkout and user profile avatar uploads. Both share a global pool of 200 HTTP worker threads. When an NFS file storage slowdown makes avatar uploads take 60 seconds each, all 200 worker threads are consumed by avatar uploads, completely blocking credit card checkout transactions.",
+    "question": "What is the Bulkhead pattern (derived from nautical ship design), how does it isolate resources across critical and non-critical workflows, and how do you implement it at the thread pool and database tier?",
+    "hints": [
+      "Bulkheads in ships divide the hull into watertight compartments so one breach does not sink the ship.",
+      "Allocate dedicated worker pools or connection pools per feature tier."
+    ],
+    "answer": "1. **The Bulkhead Concept:**\nIf a single shared resource pool (threads, memory, database connections, CPU) is used across multiple features, a degradation in a non-critical feature can saturate the entire pool, taking down mission-critical business paths.\n\n2. **Implementation at the Application Tier (Thread / Concurrency Pools):**\nPartition the concurrency capacity into isolated bulkheads:\n- **Checkout Bulkhead:** Dedicated pool of 150 threads (guaranteed minimum).\n- **Avatar Upload Bulkhead:** Dedicated pool of 30 threads + queue capacity of 50.\n- **Analytics Bulkhead:** Dedicated pool of 20 threads.\nIf NFS slows down, only the 30 avatar threads block. Subsequent uploads receive `HTTP 429 Too Many Requests` or queue up, while the 150 checkout threads operate at full speed with 0% impact.\n\n3. **Implementation at Database Tier:**\n- Isolate critical tables onto dedicated read/write instances.\n- Separate connection pools (e.g. PgBouncer pools) for high-priority transactional paths vs low-priority background reporting.",
+    "pitfalls": "Sharing a single database connection pool between user-facing web APIs and asynchronous background cron jobs. A heavy nightly report will exhaust the pool and crash the public website.",
+    "key_takeaway": "Isolate critical and non-critical traffic into separate concurrency and connection bulkheads so non-critical slowdowns cannot sink core revenue paths."
+  },
+  {
+    "id": "sre-007",
+    "title": "Graceful Degradation: Fail-Open vs Fail-Closed Strategies",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A streaming video platform's recommendation engine crashes. The home page API queries the recommendation service, encounters a timeout, and returns `HTTP 500 Internal Server Error`, displaying a completely blank crash screen to all users worldwide.",
+    "question": "What is Graceful Degradation, what is the architectural distinction between Fail-Open and Fail-Closed, and how do you design fallbacks for non-essential microservices?",
+    "hints": [
+      "Fail-Closed blocks access when a component fails (mandatory for security/payments).",
+      "Fail-Open allows access or serves default/cached content when a component fails."
+    ],
+    "answer": "1. **Fail-Open vs Fail-Closed Invariants:**\n- **Fail-Closed (Pessimistic):** If the dependency fails, the request **must be aborted**. Used when correctness and security are paramount:\n  - Credit card charging (never guess if money was paid).\n  - Authentication & Authorization checks (never grant admin access because the auth service timed out).\n- **Fail-Open (Optimistic):** If the dependency fails, bypass it or serve degraded content to keep the user experience alive:\n  - Recommendation service -> Fall back to a static list of \"Top 10 Trending Movies\".\n  - Product reviews -> Omit the reviews section while letting the user buy the item.\n  - Ad targeting -> Serve generic ads without tracking.\n\n2. **Implementation Architecture:**\nWrap non-critical calls in a resilience wrapper with a strict 200ms timeout:\n```javascript\ntry {\n  return await fetchRecommendations(userId, { timeout: 200 });\n} catch (err) {\n  metrics.inc('recommendations.fallback');\n  return getCachedTrendingFallback(); // Serve static default\n}\n```",
+    "pitfalls": "Failing-open on authorization or billing checks, or failing-closed on decorative UI elements like user avatars or recommendation carousels.",
+    "key_takeaway": "Design systems to fail-closed on security and financial transactions, and fail-open with static fallbacks on non-essential UI features."
+  },
+  {
+    "id": "sre-008",
+    "title": "Chaos Engineering: Fault Injection, Blast Radius & Steady State",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "An enterprise claims its payment architecture is fully resilient because all services have multi-AZ redundancy. An SRE conducts a chaos experiment by artificially injecting 100ms network packet latency on inter-AZ links. Within 3 minutes, the entire platform collapses due to hidden cascading timeout mismatches.",
+    "question": "What are the four core principles of Chaos Engineering, how do you define a 'Steady State Hypothesis', and how do you safely control Blast Radius during production fault injection?",
+    "hints": [
+      "Chaos engineering is not about breaking things randomly; it is about building confidence in system resilience.",
+      "Always start with small synthetic canary traffic and maintain an automated emergency abort switch."
+    ],
+    "answer": "1. **The Four Principles of Chaos Engineering:**\n1. **Define 'Steady State':** Establish measurable baseline metrics indicating normal business health (e.g. \"Successful checkout orders per minute > 5,000\" and \"P99 latency < 200ms\").\n2. **Hypothesize Resilience:** Formulate an explicit hypothesis: *\"If we terminate 50% of Redis replica pods, the steady state checkout rate will not drop by more than 0.5%.\"*\n3. **Introduce Real-World Variables:** Inject realistic faults (CPU throttling, packet drop, disk full, clock skew, zone failure) using tools like Chaos Mesh or Gremlin.\n4. **Disprove the Hypothesis:** Measure steady state metrics during the experiment to uncover hidden failure modes.\n\n2. **Blast Radius Control:**\n- **Start in Staging / Canary:** Inject faults only into synthetic canary environments or a tiny fraction (1%) of internal employee traffic.\n- **Automated Kill Switch (Dead Man's Switch):** The chaos runner must continuously poll steady state metrics. If checkout error rate exceeds 1%, the chaos experiment terminates immediately, reverting all injected faults within seconds.",
+    "pitfalls": "Running chaos tests in production without an automated rollback/kill switch or without defining steady-state business metrics first.",
+    "key_takeaway": "Chaos Engineering tests hypotheses against a defined Steady State; always enforce automated abort switches to bound the experiment blast radius."
+  },
+  {
+    "id": "sre-009",
+    "title": "Deployment Strategies: Blue-Green vs Canary vs Argo Rollouts",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A development team deploys a critical database schema migration with application changes using standard Kubernetes `RollingUpdate`. A subtle bug causes memory leaks on new pods. Before on-call engineers notice, Kubernetes has already replaced 100% of healthy pods with buggy pods, causing a global outage.",
+    "question": "Compare Rolling Update, Blue-Green Deployment, and Canary Deployment. How does Argo Rollouts automate canary analysis using Prometheus metric thresholds to trigger automated rollbacks?",
+    "hints": [
+      "Blue-Green provisions two identical environments and switches traffic at the load balancer.",
+      "Canary routes a small percentage (e.g. 5%) of live traffic to the new version before rolling out."
+    ],
+    "answer": "1. **Deployment Comparison:**\n- **Rolling Update:** Gradually replaces old pods with new pods. *Risk:* Can roll out bad code to 100% of pods before metrics show degradation.\n- **Blue-Green:** Maintains two complete production environments (Blue = live, Green = new). Once Green is verified, load balancer switches 100% of traffic to Green. *Pros:* Instant rollback. *Cons:* Double infrastructure cost.\n- **Canary (Progressive Delivery):** Routes a small slice of real user traffic (e.g. 2% -> 10% -> 50% -> 100%) to the new version while monitoring error rates.\n\n2. **Automated Canary Analysis with Argo Rollouts:**\nArgo Rollouts replaces the standard Kubernetes `Deployment` with a `Rollout` CRD:\n```yaml\nspec:\n  strategy:\n    canary:\n      steps:\n      - setWeight: 5\n      - pause: { duration: 10m }\n      analysis:\n        templates:\n        - templateName: error-rate-check\n```\nDuring the 10-minute pause, an `AnalysisTemplate` queries Prometheus: `sum(rate(http_requests_total{status=~\"5..\", app=\"canary\"}[5m])) / sum(rate(http_requests_total{app=\"canary\"}[5m])) < 0.01`.\nIf the error rate exceeds 1%, Argo Rollouts **aborts immediately**, scales the canary to 0, and restores 100% traffic to stable pods automatically.",
+    "pitfalls": "Running canaries without traffic-based metric analysis. Manually watching logs defeats the purpose of automated progressive rollouts.",
+    "key_takeaway": "Use Canary deployments with automated metric analysis (Argo Rollouts) to limit bad releases to <5% of traffic and trigger automatic rollbacks."
+  },
+  {
+    "id": "sre-010",
+    "title": "Database Failover: Split-Brain, Consensus & RPO vs RTO",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "A PostgreSQL primary database in AWS `us-east-1a` experiences a transient 15-second network hiccup with replica nodes in `us-east-1b`. The automated failover monitor promotes the replica in `1b` to Primary. When the network heals, the old primary in `1a` is still running and accepting writes from stale clients, creating two divergent databases.",
+    "question": "What is Split-Brain in database clusters, what is the role of STONITH / Fencing, and how do you calculate Recovery Point Objective (RPO) and Recovery Time Objective (RTO) during asynchronous replication failovers?",
+    "hints": [
+      "STONITH stands for 'Shoot The Other Node In The Head'.",
+      "RPO measures acceptable data loss (time delta); RTO measures acceptable downtime."
+    ],
+    "answer": "1. **Split-Brain Disaster:**\nSplit-brain occurs when a network partition causes two nodes to both believe they are the authoritative Primary. Both accept writes. When the network reconnects, transactions on Node A conflict with transactions on Node B. Reconciling conflicting primary keys and account balances requires manual, error-prone data forensics.\n\n2. **Remediation: Fencing & STONITH:**\nBefore promoting any replica to Primary, the cluster manager (Patroni, Orchestrator) **must guarantee the old primary cannot write**:\n- **STONITH (Shoot The Other Node In The Head):** Cut power to the VM, revoke its AWS IAM role, or terminate its network interface via cloud API.\n- **Fencing Tokens / Quorum:** The primary must maintain an active lease in a consensus store (etcd/Consul). If the primary loses quorum, it immediately demotes itself to read-only.\n\n3. **RPO vs RTO in Asynchronous Replication:**\n- **RTO (Recovery Time Objective):** Time to restore service (e.g. \"database must failover within 30 seconds\").\n- **RPO (Recovery Point Objective):** Amount of data loss tolerable (e.g. \"at most 5 seconds of committed transactions\").\nIn asynchronous replication, if the replica is 2 seconds behind when the primary dies, promoting it achieves $RTO = 30\\text{s}$ but causes $RPO = 2\\text{s}$ of permanent data loss.",
+    "pitfalls": "Promoting replicas automatically without verifying fencing or using consensus-backed coordinators (like Patroni with etcd). You risk catastrophic split-brain.",
+    "key_takeaway": "Never promote a replica to primary without strict fencing (STONITH) to eliminate split-brain, and balance synchronous replication against RPO requirements."
+  },
+  {
+    "id": "sre-011",
+    "title": "Adaptive Concurrency Limits vs Static Queue Limits under Overload",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "A microservice sets a static Tomcat/Puma concurrency limit of 500 connections. When a downstream database slows down, average query latency increases from 10ms to 200ms. According to Little's Law ($L = \\lambda \\times W$), the service requires 20x more in-flight requests to maintain throughput. Memory exhausts and the service crashes.",
+    "question": "Why do static concurrency limits fail under dynamic downstream latency variations, and how does Netflix's Adaptive Concurrency Limits (based on TCP Vegas congestion control) dynamically discover system capacity?",
+    "hints": [
+      "Little's Law: $L = \\lambda \\times W$ (Concurrency = Throughput × Latency).",
+      "TCP Vegas measures queue build-up by comparing observed round-trip time against baseline min RTT."
+    ],
+    "answer": "1. **Why Static Limits Fail:**\nSystem capacity is not static. Concurrency is governed by Little's Law:\n$$\\text{In-Flight Requests} (L) = \\text{Throughput} (\\lambda) \\times \\text{Latency} (W)$$\n- When downstream services are fast (10ms): The service can easily handle 500 concurrent connections.\n- When downstream services slow to 500ms: 500 concurrent connections saturate thread pools, balloon memory, and degrade the server.\nStatic limits are either set too low (wasting capacity under normal traffic) or too high (failing to prevent collapse during slowdowns).\n\n2. **Adaptive Concurrency Limits (TCP Vegas Algorithm):**\nInstead of a static number, dynamically calculate the maximum in-flight limit based on observed latency:\n- Track **$\\text{RTT}_{\\text{min}}$** (the fastest response time observed under zero queue delay).\n- Measure current **$\\text{RTT}$** across a rolling window.\n- If $\\text{RTT} \\approx \\text{RTT}_{\\text{min}}$, no queue is forming: gradually increment the concurrency limit ($L = L + 1$).\n- If $\\text{RTT} > \\text{RTT}_{\\text{min}} \\times 1.2$, an internal queue is building up: reduce the concurrency limit ($L = L - 1$ or $L = L \\times 0.8$).\n\n3. **Result:**\nThe service sheds excess load with `HTTP 429` at the exact boundary where latency begins to degrade, maintaining optimal throughput without crashing.",
+    "pitfalls": "Allowing in-flight request queues to grow infinitely. Queued requests consume RAM, expire upstream timeouts, and waste CPU processing requests that users have already abandoned.",
+    "key_takeaway": "Implement Adaptive Concurrency Limits (TCP Vegas) to dynamically discover safe in-flight concurrency and reject excess requests before memory exhausts."
+  },
+  {
+    "id": "sre-012",
+    "title": "Alert Fatigue & On-Call Hygiene: Actionability & Paging Invariants",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate",
+    "scenario": "An SRE team receives an average of 45 PagerDuty alerts per night. Over 80% of alerts are marked 'resolved' without any engineer taking action because the metric self-corrected after 3 minutes. During this flood, a critical customer data corruption alert fired, was ignored as noise, and went unaddressed for 14 hours.",
+    "question": "What are the core Google SRE principles of alert hygiene, what makes an alert 'Actionable', and what is the rule regarding alerts that require no human intervention?",
+    "hints": [
+      "Every page must require urgent, intelligent human intervention right now.",
+      "If a condition can self-heal or wait until morning, it should NOT wake someone up."
+    ],
+    "answer": "1. **The Core Paging Invariant:**\n**Every page must require immediate, urgent human intervention.** If an alert fires and the on-call engineer does not take a specific operational action (e.g. rolling back a deployment, scaling a cluster, toggling a feature flag), that alert is a failure of alerting design.\n\n2. **The 4 Rules of Healthy Alerting:**\n1. **Alert on Symptoms, Not Causes:** Do not page on high CPU (cause); page when user checkout error rates breach SLO (symptom). High CPU is healthy if latency and error budgets are intact.\n2. **Never Page on Self-Healing Noise:** If an alert frequently auto-resolves within 5 minutes, increase the alert duration (`for: 15m`) or use burn-rate alerts.\n3. **Automate Deterministic Actions:** If the remediation is always *\"restart pod X\"*, write a Kubernetes controller or cron script to restart it automatically. Never use humans as software glue.\n4. **Tiered Alert Routing:**\n   - **Page (Urgent):** Breaches user-facing SLO. Wakes on-call.\n   - **Ticket (Next Business Day):** Disk is 75% full (will exhaust in 2 weeks). Generates Jira ticket.\n   - **Dashboard (Informational):** Metrics for post-incident debugging.",
+    "pitfalls": "Setting up alerts for every single metric and threshold. High alert volume causes alert fatigue, guaranteeing real critical emergencies will be missed.",
+    "key_takeaway": "Only page humans for actionable, urgent emergencies that require human judgment; automate routine fixes and downgrade non-urgent warnings to business-hour tickets."
+  },
+  {
+    "id": "sre-013",
+    "title": "Multi-Region Disaster Recovery: Active-Active vs Active-Passive",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "A SaaS platform maintains an Active-Passive disaster recovery setup between AWS `us-east-1` (Primary) and AWS `eu-west-1` (Standby). When `us-east-1` suffers a major power outage, the team initiates failover to `eu-west-1`. The standby region fails immediately due to capacity shortages, stale configuration drifts, and cold database connection storms.",
+    "question": "Why do Active-Passive disaster recovery architectures frequently fail in real emergencies, and what are the trade-offs of Active-Active multi-region architectures (replication lag, write conflicts, data residency)?",
+    "hints": [
+      "Untested standby environments suffer from silent configuration drift.",
+      "Active-Active requires solving multi-master write conflicts (CRDTs or partitioned ownership)."
+    ],
+    "answer": "1. **The Fallacy of Active-Passive DR:**\n- **Configuration Drift:** Because the passive region receives zero production traffic, unnoticed differences (outdated AMI images, missing IAM permissions, un-synced secrets, cloud service quotas) accumulate.\n- **Cold Starts:** Database caches are completely cold. When 100% of global traffic shifts instantly, cold caches cause catastrophic database stampedes.\n- **Capacity Guarantees:** During a major cloud region outage, thousands of companies scramble to provision VMs in the backup region simultaneously, hitting cloud provider capacity limits.\n\n2. **Active-Active Architecture:**\nBoth regions serve live customer traffic continuously:\n- **Traffic Routing:** Route 53 Geolocation or Anycast DNS routes users to their closest region.\n- **Partitioned Data Ownership:** Shard data by user or tenant (e.g. European users write to `eu-west-1`, US users write to `us-east-1`). Each region is primary for its own shard, avoiding cross-region distributed transactions.\n- **Cross-Region Asynchronous Replication:** Data is replicated asynchronously to the sister region. If Region A dies, Region B takes over with warm caches and validated configurations.\n\n3. **Trade-offs:** Significantly higher infrastructure cost, eventual consistency lag, and GDPR/data residency compliance complexity.",
+    "pitfalls": "Maintaining an Active-Passive DR plan without running regular unannounced failover drills in production. If you don't test it monthly, it will not work during an outage.",
+    "key_takeaway": "Active-Passive environments fail during real disasters due to configuration drift; prefer Active-Active architectures with partitioned data ownership."
+  },
+  {
+    "id": "sre-014",
+    "title": "Capacity Planning & Load Testing: Spike vs Stress vs Soak Testing",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "An e-commerce company prepares for Black Friday. Engineers run a 10-minute load test at 5,000 req/sec using k6. The test passes with flying colors. On Black Friday, after 4 hours of sustained 5,000 req/sec traffic, the entire platform crashes due to a slow memory leak and database WAL disk exhaustion.",
+    "question": "Distinguish between Smoke, Load, Stress, Spike, and Soak testing. Why did the 10-minute load test fail to catch the Black Friday crash, and how do you design a proper Soak Test?",
+    "hints": [
+      "Load testing tests expected peak; Soak testing tests sustained load over long durations.",
+      "Memory leaks, disk filling, and database bloat only manifest over hours."
+    ],
+    "answer": "1. **The Spectrum of Performance Testing:**\n- **Smoke Test:** Minimal load (2-5 VUs) to verify basic functionality post-deploy.\n- **Load Test:** Tests normal expected peak traffic (e.g. 5,000 req/sec for 15 minutes) to ensure SLOs are met.\n- **Stress Test:** Pushes traffic past normal limits until the system breaks, discovering the breaking point and failure mode (does it shed load cleanly or crash?).\n- **Spike Test:** Simulates instantaneous surges (0 to 10,000 req/sec in 5 seconds) to test autoscaler response and connection pool shock.\n- **Soak (Endurance) Test:** Runs sustained moderate-to-heavy traffic for **extended durations (12 to 48 hours)**.\n\n2. **Why the 10-Minute Test Failed:**\nShort tests only validate immediate compute throughput. They are blind to cumulative system degradation:\n- Slow memory leaks (e.g. 2MB leaked per minute takes hours to trigger OOM).\n- Database log accumulation (WAL logs, binlogs, disk space).\n- PostgreSQL table bloat and auto-vacuum falling behind.\n- OS file descriptor and socket pool exhaustion.\n\n3. **Designing a Soak Test:** Run 75-80% of peak load continuously for at least 24 hours while graphing memory slope, GC frequency, and disk usage.",
+    "pitfalls": "Running load tests using identical request parameters. Real user traffic has diverse data payloads; caching engines will artificially mask real database load if identical IDs are queried.",
+    "key_takeaway": "Always run extended Soak Tests (12-24 hours) to uncover memory leaks, connection leaks, and disk bloat before major traffic events."
+  },
+  {
+    "id": "sre-015",
+    "title": "Zero-Trust Service Mesh & mTLS: Workload Identity via SPIFFE/SPIRE",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "In a corporate network, security relied on perimeter firewalls (\"castle-and-moat\"). An attacker gains access to a staging environment and moves laterally across internal subnets to access internal production payment databases without credentials.",
+    "question": "What is Zero-Trust architecture in SRE ('never trust, always verify'), how does mutual TLS (mTLS) authenticate both client and server, and how does the SPIFFE/SPIRE standard provide cryptographic workload identity?",
+    "hints": [
+      "Standard TLS only authenticates the server to the client; mTLS requires the client to present a certificate too.",
+      "SPIFFE IDs look like `spiffe://domain/ns/prod/sa/payment-svc`."
+    ],
+    "answer": "1. **Zero-Trust Principles:**\nPerimeter security (assuming anything inside the private subnet is trustworthy) is dead. Zero-Trust mandates that **every request must be authenticated, authorized, and encrypted**, regardless of whether it originates from the public internet or an adjacent container on the same host.\n\n2. **Mutual TLS (mTLS) via Service Mesh:**\n- Traditional TLS: Client verifies server certificate.\n- **mTLS:** Both server AND client present X.509 certificates during handshake. Both verify identities cryptographically. Traffic on the wire is encrypted, neutralizing packet sniffing and Man-in-the-Middle attacks.\n\n3. **Workload Identity: SPIFFE / SPIRE:**\n- **SPIFFE (Standard):** Defines a uniform URI format for service identity: `spiffe://cluster.local/ns/production/sa/payment-service`.\n- **SPIRE (Agent & Server):** Runs an agent on each node that attests pod identity directly against the Kubernetes kubelet and Linux kernel (`SO_PEERCRED`). SPIRE issues short-lived (e.g. 1-hour) X.509 SVID certificates and rotates them automatically without downtime, eliminating hardcoded long-lived API tokens.",
+    "pitfalls": "Using static, long-lived client certificates for service-to-service auth. Certificate rotation becomes an operational nightmare; use SPIRE or service meshes (Istio/Linkerd) for automated rotation.",
+    "key_takeaway": "Eliminate perimeter-only security by enforcing mTLS and automated cryptographic workload identities (SPIFFE/SPIRE) between all internal services."
+  },
+  {
+    "id": "sre-016",
+    "title": "Telemetry Cost & Cardinality Control: Sampling & Downsampling",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A company's Datadog / Honeycomb observability bill jumps from $5,000/month to $85,000/month in 60 days. The increase is driven by storing 100% of distributed traces and ingesting billions of log lines containing high-cardinality user IDs.",
+    "question": "What is the difference between Head-Based and Tail-Based sampling in distributed tracing, and how do you reduce Prometheus metric cardinality without losing diagnostic fidelity?",
+    "hints": [
+      "Head-based sampling decides whether to sample at the start of a request.",
+      "Tail-based sampling waits until the trace finishes and samples 100% of errors and high-latency traces."
+    ],
+    "answer": "1. **Tracing Sampling: Head-Based vs Tail-Based:**\n- **Head-Based Sampling (at Ingress):** Decides whether to record the trace at the very moment the request arrives at the edge (e.g. randomly sample 1% of requests). *Flaw:* A catastrophic 500 error that happens only on 0.1% of requests has a 99% chance of being discarded!\n- **Tail-Based Sampling (via OpenTelemetry Collector):** Buffers all spans in memory across the request lifecycle. Once the trace completes:\n  - If status is `ERROR`: Sample **100%** of traces.\n  - If latency > 1,000ms: Sample **100%** of traces.\n  - If status is HTTP 200 with normal latency: Sample only **0.1%**.\n  *Cuts tracing storage by 90% while capturing 100% of production anomalies.*\n\n2. **Prometheus Cardinality Control:**\n- Never put unbounded values (user IDs, email addresses, order UUIDs, full URLs) into Prometheus labels. Each unique label combination creates an entirely new time-series.\n- Implement **Metric Downsampling:** Retain 15s raw data for 14 days, downsample to 5-minute averages for 90 days, and 1-hour rollups for 1 year.",
+    "pitfalls": "Adding `order_id` or `user_id` as a label in Prometheus metrics. It causes a metric explosion that crashes Prometheus with out-of-memory errors.",
+    "key_takeaway": "Use Tail-Based sampling in OpenTelemetry Collectors to capture all errors while discarding mundane traces, and strictly forbid high-cardinality IDs in metric labels."
+  },
+  {
+    "id": "sre-017",
+    "title": "Incident Command System (ICS): Roles & Protocol During Sev-1 Outages",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate",
+    "scenario": "During a critical Sev-1 production outage, 30 engineers, 5 managers, and the VP of Engineering join the emergency conference bridge. Everyone speaks over each other, executives demand ETA updates every 2 minutes, and three engineers independently apply conflicting configuration changes directly to production.",
+    "question": "How does the Incident Command System (ICS) structure crisis management, what are the distinct roles of the Incident Commander, Tech Lead, Communications Lead, and Scribe, and what is the rule regarding command hierarchy?",
+    "hints": [
+      "The Incident Commander does NOT fix the bug; they coordinate people and delegate tasks.",
+      "Executives do not override the Incident Commander during an active incident."
+    ],
+    "answer": "1. **The Purpose of ICS:**\nAdapted from firefighter crisis protocols, ICS removes chaos by establishing a single, undisputed operational hierarchy during production incidents.\n\n2. **Key Roles:**\n- **Incident Commander (IC):** The ultimate authority during the incident. Coordinates actions, delegates investigation streams, enforces quiet on the call, and makes go/no-go decisions. **The IC does not write code or debug** (to maintain 10,000-foot situational awareness).\n- **Tech Lead / Operations Lead:** Directs the technical investigation (pulling metrics, triaging logs) and assigns specific tasks to domain subject matter experts (SMEs).\n- **Communications Lead:** Shields the technical team from executive interruptions. Posts updates to customer status pages and internal leadership channels every 15-30 minutes.\n- **Scribe:** Documents the chronological event timeline in real time (e.g. \"14:02 UTC: Eng rolled back deploy to v1.4\"), crucial for post-mortem analysis.\n\n3. **Executive Override Rule:**\nRegardless of corporate title, **the Incident Commander holds operational command**. Executives are muted or given updates strictly via the Communications Lead.",
+    "pitfalls": "Allowing the Incident Commander to dive into debugging code. The moment the IC starts debugging, operational coordination evaporates and cross-team alignment fails.",
+    "key_takeaway": "Run Sev-1 incidents using ICS roles: the Incident Commander coordinates and delegates while the Comms Lead protects technical workers from executive interruptions."
+  },
+  {
+    "id": "sre-018",
+    "title": "Blackbox Probing vs Whitebox Telemetry: Catching Silent Network Failures",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "All internal Kubernetes pods report healthy Prometheus metrics: CPU is 20%, error rate is 0%, and memory is stable. However, customer support is flooded with calls that the mobile app cannot log in. A DNS routing misconfiguration outside the cluster was dropping 100% of user traffic at the edge.",
+    "question": "What is the difference between Whitebox monitoring and Blackbox probing, why did internal metrics fail to detect this total outage, and how do you design end-to-end synthetic monitoring?",
+    "hints": [
+      "Whitebox monitoring measures internal telemetry (CPU, logs, internal metrics).",
+      "Blackbox probing tests the system from the outside user's perspective."
+    ],
+    "answer": "1. **Whitebox vs Blackbox Monitoring:**\n- **Whitebox Monitoring:** Telemetry emitted from *inside* the system (application metrics, JVM heap, database query latency, server logs). *Limitation:* If traffic cannot reach the application (due to DNS failure, expired TLS certificate, BGP routing drop, or CDN misconfiguration), the application observes 0 errors and zero traffic, reporting everything as \"healthy\"!\n- **Blackbox Monitoring (Synthetic Probing):** External monitoring probes (Prometheus Blackbox Exporter, Pingdom, Datadog Synthetics) located outside your network infrastructure that regularly query public endpoints from multiple global geographic locations.\n\n2. **Blackbox Prober Capabilities:**\n- Validates DNS resolution across public resolvers (Google 8.8.8.8, Cloudflare 1.1.1.1).\n- Checks TLS handshake validity and days until certificate expiration.\n- Executes complete synthetic user journeys (e.g. simulating user login, placing an item in cart, and verifying HTTP 200 payload).\n\n3. **Rule:** Paging alerts should be tied primarily to Blackbox synthetic success and customer SLOs.",
+    "pitfalls": "Relying exclusively on internal application metrics for availability alerting. If edge routing dies, your internal metrics will happily report 0% error rate.",
+    "key_takeaway": "Pair internal whitebox telemetry with external blackbox synthetic probes to catch edge routing, DNS, and TLS failures before customers report them."
+  },
+  {
+    "id": "sre-019",
+    "title": "MTTR, MTTD, MTBF & Blameless Post-Mortem Culture",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate",
+    "scenario": "A junior engineer accidentally runs a command that drops a staging database table that was erroneously linked to production. The engineering manager immediately issues a formal reprimand and revokes the junior engineer's deployment permissions.",
+    "question": "Why does punitive culture guarantee future catastrophic outages, what is a Blameless Post-Mortem, and how do you measure reliability through MTTR, MTTD, and MTBF?",
+    "hints": [
+      "In a blameless culture, human error is the starting point of an investigation, not the root cause.",
+      "Systems must be designed so that no single human action can cause a disaster."
+    ],
+    "answer": "1. **Why Blame Destroys Reliability:**\nIf engineers are punished for human mistakes, people hide failures, delay reporting incidents, and avoid touching fragile legacy systems. Second, blaming a human ignores the systemic design failure: **Why was an engineer capable of dropping a production database with a single unverified command?**\n\n2. **The Blameless Post-Mortem Standard:**\nAssumes that engineers are competent and acted in good faith based on the information they had. The investigation focuses on:\n- What systemic guards were missing? (e.g. why did staging credentials have access to production?).\n- Why did tooling not require two-person verification for destructive commands?\n- How can automated rollback or validation detect this earlier next time?\nEvery post-mortem must produce concrete, prioritized Action Items with assigned owners.\n\n3. **Reliability Metrics:**\n- **MTTD (Mean Time to Detect):** Time from when the bug went live until alerts fired.\n- **MTTR (Mean Time to Resolve):** Time from detection until service was restored.\n- **MTBF (Mean Time Between Failures):** Measure of system stability and frequency of incidents.",
+    "pitfalls": "Writing post-mortems that list \"retrain engineers\" or \"be more careful\" as action items. Human discipline is not an engineering control.",
+    "key_takeaway": "Conduct blameless post-mortems focused on systemic safety mechanisms; optimize for Mean Time to Detect (MTTD) and Mean Time to Resolve (MTTR)."
+  },
+  {
+    "id": "sre-020",
+    "title": "Latency Profiling: Percentiles vs Averages & Coordinated Omission",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "A monitoring dashboard displays an average API latency of 45ms. Management celebrates meeting the SLA. However, customer churn increases, and high-value VIP accounts complain the application frequently freezes for 10 seconds during checkout.",
+    "question": "Why are averages mathematically deceptive for latency distributions, what is the significance of P95, P99, and P99.9, and what is Gil Tene's 'Coordinated Omission' flaw in benchmarking tools?",
+    "hints": [
+      "Averages hide extreme outliers; 99 requests at 1ms and 1 request at 10,000ms average out to ~101ms.",
+      "Coordinated Omission occurs when benchmark clients back off or block during server stalls, omitting measurement of delayed requests."
+    ],
+    "answer": "1. **The Deception of Mean (Average) Latency:**\nLatency distributions are **multi-modal and heavily right-skewed**, not normal bell curves. If 999 users experience 10ms response time and 1 user experiences a 10,000ms timeout, the average is ~20ms—completely concealing the catastrophic 10-second stall.\n\n2. **Percentiles Breakdown:**\n- **p50 (Median):** The experience of the typical user.\n- **p99 (99th Percentile):** The worst 1 in 100 requests. For a web page making 50 backend API calls per page load, a user has a $1 - (0.99)^{50} \\approx 39.5\\%$ probability of experiencing a p99 latency spike on every single page load!\n- **p99.9:** The experience of your most active, heaviest enterprise customers.\n\n3. **Coordinated Omission (Gil Tene):**\nA fatal measurement flaw in naive load testing tools (like standard ApacheBench):\n- If the tool sends 100 req/sec and the server pauses for 10 seconds (e.g. during a GC freeze):\n- The client blocks waiting for the response. It does **not** send the 1,000 requests that should have been issued during those 10 seconds!\n- The test measures only the single paused request, and \"omits\" the 1,000 requests that would have waited up to 10 seconds. Use tools like `wrk2` or `k6` that account for coordinated omission.",
+    "pitfalls": "Using average latency in SLAs. You can have a 50ms average latency while 1% of your customers experience total service timeouts.",
+    "key_takeaway": "Never measure latency with averages. Alert on p99 and p99.9 percentiles, and use load testing tools that correct for Coordinated Omission."
   }
 ]
