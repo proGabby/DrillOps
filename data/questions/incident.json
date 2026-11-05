@@ -1,0 +1,32 @@
+[
+  {
+    "id": "inc-001",
+    "title": "Production Mystery: 504 Gateway Timeouts During Rolling Deploy",
+    "domain": "Incident Triage & Production War Stories",
+    "difficulty": "Advanced",
+    "scenario": "A Kubernetes rolling update (`RollingUpdate` strategy) is triggered for an API service. As new pods start and old pods terminate, clients immediately experience a burst of 504 Gateway Timeouts and 502 Bad Gateway errors for ~15 seconds, despite zero application crashes and zero failed readiness probes.",
+    "question": "What is the race condition between Kubernetes endpoint removal, iptables/kube-proxy synchronization, and container SIGTERM delivery, and what two Kubernetes manifest settings guarantee zero-downtime graceful shutdown?",
+    "hints": [
+      "SIGTERM is sent to the container at the same time Kubernetes begins removing the pod IP from iptables across nodes.",
+      "Look into `preStop` hooks and `terminationGracePeriodSeconds`."
+    ],
+    "answer": "1. **The Race Condition:**\nWhen a pod is deleted:\n- The API server tells kubelet to send `SIGTERM` to the container.\n- Simultaneously, the endpoints controller updates the `Endpoints` object, and `kube-proxy` asynchronously updates iptables/IPVS rules across all cluster nodes.\nBecause iptables propagation takes 1-3 seconds across a cluster, ingress controllers or load balancers continue routing new HTTP requests to the terminating pod's IP address. If the application process exits immediately upon receiving `SIGTERM`, incoming requests hit a closed socket, resulting in HTTP 502/504 errors.\n\n2. **The Two Settings to Fix:**\n- **Add a `preStop` sleep hook:**\n```yaml\nlifecycle:\n  preStop:\n    exec:\n      command: [\"/bin/sh\", \"-c\", \"sleep 10\"]\n```\nThis forces kubelet to wait 10 seconds before sending `SIGTERM`, giving kube-proxy and Ingress ample time to remove the pod IP from traffic rotation before the app begins shutting down.\n- **Graceful Connection Draining in Code:**\nWhen `SIGTERM` arrives, close the listener to new traffic but allow in-flight HTTP requests up to `terminationGracePeriodSeconds: 45` to finish cleanly (`server.Shutdown(ctx)` in Go, `server.close()` in Node).",
+    "pitfalls": "Relying purely on readiness probes during shutdown. Once pod termination begins, Kubernetes immediately marks the pod as `Terminating` and ignores readiness probes.",
+    "key_takeaway": "Always include a `preStop: sleep 10` hook on Kubernetes deployments to allow iptables / Ingress routes to drain before terminating pods."
+  },
+  {
+    "id": "inc-002",
+    "title": "Redis Cluster Freeze: The KEYS * Incident",
+    "domain": "Incident Triage & Production War Stories",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "At 2:15 PM, an entire e-commerce checkout flow completely freezes. Latency on all services spikes to timeout limits. Redis CPU usage shows 100% on a single primary core, while memory and network bandwidth remain low. Redis is configured in cluster mode.",
+    "question": "Why does Redis run on a single-threaded execution model for command processing, what happens when an admin or batch script executes `KEYS *` or `FLUSHALL` on a production instance with 10 million keys, and what command must be used instead for safe scanning?",
+    "hints": [
+      "`KEYS` is an O(N) blocking operation.",
+      "Use cursor-based iteration (`SCAN`)."
+    ],
+    "answer": "1. **Root Cause:**\nRedis uses an event-driven, single-threaded execution model for executing client commands. Although modern Redis uses background threads for I/O and asynchronous socket reads, **all command execution happens sequentially on one thread**.\n`KEYS *` has a time complexity of **O(N)**. On a production dataset with millions of keys, running `KEYS user:*` blocks the single thread for 5 to 30 seconds. Every other incoming command (including basic `GET`, `SET`, and health checks) is queued behind it, causing connection pools across all microservices to exhaust.\n\n2. **Safe Alternative:**\nUse **`SCAN`** (or `HSCAN`, `SSCAN`, `ZSCAN`):\n```bash\nSCAN 0 MATCH user:* COUNT 1000\n```\n`SCAN` is a cursor-based iterator that returns small chunks of keys and yields CPU control between calls, allowing other production traffic to process without blocking.\n\n3. **Production Hardening:**\nDisable dangerous blocking commands in `redis.conf`:\n```conf\nrename-command KEYS \"\"\nrename-command FLUSHALL \"\"\nrename-command FLUSHDB \"\"\n```",
+    "pitfalls": "Assuming Redis multi-threading in Redis 6+ allows `KEYS *` to run on a background thread. Only network socket I/O is threaded; command processing is still single-threaded.",
+    "key_takeaway": "Never run `KEYS *` in production. Always use cursor-based `SCAN` or disable the `KEYS` command in `redis.conf`."
+  }
+]
