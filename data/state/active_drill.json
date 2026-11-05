@@ -20,6 +20,6 @@
     "pitfalls": "Alerting on single metrics or short windows without checking whether the issue is sustained. This destroys on-call morale.",
     "key_takeaway": "Alert on Error Budget Burn Rates using paired short and long windows, not arbitrary static CPU or 5-minute error percentages."
   },
-  "aiMockLog": null,
-  "sentAt": "2026-11-05T22:02:43.366Z"
+  "aiMockLog": "`ALERT: PaymentsService/ProcessTransaction ErrorRateHigh (",
+  "sentAt": "2026-11-05T22:47:32.188Z"
 }
