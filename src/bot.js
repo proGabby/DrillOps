@@ -25,7 +25,7 @@ export function readActiveDrill() {
       const content = fs.readFileSync(tmpPath, 'utf8');
       return JSON.parse(content);
     }
-  } catch (_) {}
+  } catch (_) { }
 
   return null;
 }
