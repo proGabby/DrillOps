@@ -1,0 +1,28 @@
+{
+  "name": "daily-tech-drill",
+  "version": "1.0.0",
+  "description": "Automated 2-phase daily technical challenge pipeline for DevOps, Go, Node.js, SRE, and Tools delivered via WhatsApp.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "drill:morning": "node src/index.js --phase morning",
+    "drill:evening": "node src/index.js --phase evening",
+    "drill:test": "node src/index.js --phase morning --dry-run"
+  },
+  "keywords": [
+    "devops",
+    "golang",
+    "nodejs",
+    "sre",
+    "interview-prep",
+    "whatsapp",
+    "automation",
+    "github-actions"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
