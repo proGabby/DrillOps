@@ -114,7 +114,7 @@ To enable AI enrichment and the 2-way Telegram mentor:
 ### Step 1: Push This Repository to GitHub
 
 ```bash
-cd /Users/macbookpro/Documents/inimfon/daily-tech-drill
+cd /Users/macbookpro/Documents/xxx/xxxxx
 
 # Verify git status
 git status
@@ -241,8 +241,4 @@ To add custom scenarios, edit any file in `data/questions/<domain>.json` followi
 
 The pipeline automatically detects new questions and incorporates them into the rotation cycle.
 
----
 
-## License
-
-MIT License. Feel free to fork, customize, and level up your engineering team!
