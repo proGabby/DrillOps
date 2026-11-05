@@ -15,3 +15,4 @@ export async function sendNotification(messageText, options = { dryRun: false })
     return await sendWhatsAppMessage(messageText, options);
   }
 }
+
