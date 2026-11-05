@@ -43,5 +43,260 @@
     "answer": "1. **Step 1: Check `%usr` vs `%sys` (top / pidstat):**\nRun `top -p <pid>` or `pidstat -u 1 5`:\n- If **%usr is ~100% and %sys is ~0%**: The process is spinning in pure user-space code (infinite loop, CPU-heavy parsing, regex backtrack, or busy-wait). It is **not** making system calls.\n- If **%sys is high (>50%)**: The process is spending its time in the Linux kernel (excessive context switching, system call thrashing, memory paging).\n\n2. **Step 2: Inspect System Calls (strace):**\n- If %sys is high: Run `strace -c -p <PID>` for 5 seconds. It outputs a summary table showing which syscalls (e.g. `futex`, `epoll_wait`, `read`) are being invoked millions of times and where execution time is spent.\n- Run `strace -t -e trace=network -p <PID>` to see live socket calls.\n\n3. **Step 3: Socket Buffer Inspection (ss):**\nRun `ss -tulpn` or `ss -tmi 'sport = :8080'` to inspect `Recv-Q` and `Send-Q`:\n- High `Recv-Q`: Kernel received packets, but the application is not calling `read()`/`accept()` fast enough.\n- High `Send-Q`: Application wrote data, but socket buffers are full waiting for TCP ACKs from a slow client.",
     "pitfalls": "Running unconditional `strace -p <PID>` on a high-throughput production binary without `-c` or filters. `strace` hooks `ptrace` on every syscall, which can degrade performance by 10x-50x and crash production traffic.",
     "key_takeaway": "Check `%usr` vs `%sys` first to determine whether your bottleneck is user-space logic or kernel syscall overhead before running diagnostic tools."
+  },
+  {
+    "id": "tool-004",
+    "title": "Prometheus Metric Types: Counter, Gauge, Histogram vs Summary",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A development team instruments a microservice using client library primitives. For an API response latency metric, they select `Summary` with client-calculated quantiles (0.5, 0.9, 0.99). In Prometheus and Grafana, they discover they cannot aggregate latency across their 20 Kubernetes cluster pods.",
+    "question": "Compare Counter, Gauge, Histogram, and Summary metrics. Why are client-side calculated Summary quantiles mathematically impossible to aggregate across multiple instances, and why must Histograms be used for cluster-wide percentiles?",
+    "hints": [
+      "Quantiles cannot be averaged: the average of two 99th percentiles is NOT the 99th percentile.",
+      "Histograms export raw counts in bucket counters which can be summed across instances using `sum() by (le)`."
+    ],
+    "answer": "1. **The Four Metric Types:**\n- **Counter:** Monotonically increasing cumulative metric (e.g. `http_requests_total`). Can only increase or reset to 0 upon process restart. Analyzed with `rate()` or `increase()`.\n- **Gauge:** Represents a single numerical value that can arbitrarily go up or down (e.g. `memory_usage_bytes`, `active_connections`).\n- **Histogram:** Samples observations into configurable buckets and provides `_count` and `_sum`. Client increments bucket counters (e.g. `le=\"0.1\"`, `le=\"0.5\"`).\n- **Summary:** Calculates streaming $\\phi$-quantiles (p50, p95, p99) in client memory over a sliding time window.\n\n2. **The Fatal Flaw with Summaries in Distributed Systems:**\nQuantiles are non-aggregatable: **You cannot take the average or sum of percentiles across multiple servers**. If Pod A has $p99 = 100\\text{ms}$ and Pod B has $p99 = 500\\text{ms}$, their average is mathematically meaningless because the sample counts on each pod are unknown and distributions differ.\n\n3. **Why Histograms Win:**\nHistograms expose simple integer counters per bucket. Prometheus can aggregate buckets across 100 pods using `sum by (le) (rate(http_duration_bucket[5m]))` and then compute a mathematically correct global cluster percentile via `histogram_quantile()`.",
+    "pitfalls": "Using `Summary` metrics for services running multiple replicas in Kubernetes. You will never be able to calculate a cluster-wide P99 latency metric.",
+    "key_takeaway": "Always use Histograms (not Summaries) when monitoring latency across distributed instances so Prometheus can aggregate percentiles across pods."
+  },
+  {
+    "id": "tool-005",
+    "title": "High Cardinality Meltdown: Label Explosions in Prometheus",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "An engineer adds a label to a Prometheus counter: `http_requests_total{method=\"GET\", status=\"200\", user_id=\"12345\"}`. Over the weekend, 2 million unique users access the platform. On Monday morning, Prometheus is crashing continuously with `OOMKilled`, queries time out after 60 seconds, and the TSDB head chunk consumes 64GB of RAM.",
+    "question": "What is Metric Cardinality, how does Prometheus store time-series in its Time Series Database (TSDB) inverted index, and how do you audit and remediate cardinality explosions using Prometheus diagnostic endpoints?",
+    "hints": [
+      "Every unique combination of key-value label pairs creates a distinct, permanent time-series.",
+      "Check Prometheus TSDB Status at `/classic/tsdb-status`."
+    ],
+    "answer": "1. **What is Cardinality?**\nCardinality is the total number of unique time series in the database. Total series is the multiplicative product of all label values:\n$$\\text{Series} = \\text{Methods (5)} \\times \\text{Status (10)} \\times \\text{Routes (50)} \\times \\text{UserIDs (2,000,000)} = 5,000,000,000\\text{ series}!$$\nPrometheus maintains an in-memory inverted index (postings list) mapping labels to 32-bit series IDs. Billions of series will exhaust all physical memory on the TSDB node.\n\n2. **Diagnosing the Culprit:**\n- Navigate to Prometheus Web UI -> **Status** -> **TSDB Status** (`/classic/tsdb-status`).\n- Inspect the tables: **Top 10 label names with high cardinality** and **Top 10 label values with high memory usage** to immediately identify the exploding label name (`user_id`).\n- CLI query: `topk(10, count by (__name__) ({__name__=~\".+\"}))`.\n\n3. **Remediation:**\n- Drop the high-cardinality label at ingestion using Prometheus `metric_relabel_configs`:\n```yaml\nmetric_relabel_configs:\n- regex: \"user_id|order_id|email\"\n  action: labeldrop\n```\n- Send high-cardinality data to structured log aggregators (Loki, Elasticsearch) or distributed tracing, never metric labels.",
+    "pitfalls": "Putting unbounded parameters like IP addresses, customer emails, UUIDs, or raw error messages into Prometheus metric labels.",
+    "key_takeaway": "Never use unbounded dynamic identifiers in Prometheus labels. Audit cardinality via TSDB Status and drop high-cardinality labels using `metric_relabel_configs`."
+  },
+  {
+    "id": "tool-006",
+    "title": "PromQL Deep Dive: Vector Matching with on(), ignoring(), group_left/right",
+    "domain": "Tools & Observability",
+    "difficulty": "Advanced",
+    "scenario": "An SRE writes a Prometheus alerting rule to calculate per-pod memory usage percentage: `container_memory_working_set_bytes / kube_pod_container_resource_limits{resource=\"memory\"}`. The query returns an empty result with zero rows, even though both individual metrics return thousands of series.",
+    "question": "Why does binary arithmetic between two instant vectors fail when labels do not match exactly, how do `on()` and `ignoring()` modify label matching, and when must `group_left()` or `group_right()` be used for many-to-one matching?",
+    "hints": [
+      "Vector matching requires an exact 1-to-1 match across all label names and values by default.",
+      "`group_left` indicates that the left-hand side vector has many series matching one series on the right."
+    ],
+    "answer": "1. **Why the Query Returned Empty:**\nIn PromQL, binary vector operations (like `/` or `*`) evaluate **one-to-one matching** by default. A series on the left side only matches a series on the right if **every single label and value matches identically**. Because `kube_pod_container_resource_limits` contains Kubernetes cluster metadata labels that `container_memory_working_set_bytes` does not have, zero matches occurred.\n\n2. **Vector Matching Modifiers (`on` / `ignoring`):**\nUse `on(labels...)` to restrict matching to a specific subset of shared labels:\n```promql\ncontainer_memory_working_set_bytes\n  /\non (namespace, pod, container)\nkube_pod_container_resource_limits{resource=\"memory\"}\n```\n\n3. **Many-to-One Matching (`group_left` / `group_right`):**\nIf multiple metric series match a single metadata series (e.g. multiple container metrics matching one pod metadata label):\n```promql\nrate(http_requests_total[5m])\n  *\non (instance)\ngroup_left (version, environment)\nnode_info\n```\n`group_left` instructs PromQL: \"Many series on the left match one series on the right. Copy the specified labels (`version`, `environment`) from the right-hand vector into the resulting time series.\"",
+    "pitfalls": "Confusing `group_left` and `group_right`. The side with the higher cardinality (the \"many\" side) determines the keyword (`group_left` = left side has many).",
+    "key_takeaway": "Use `on(labels)` to match disparate vectors on shared identifiers, and `group_left` for many-to-one label enrichment in PromQL."
+  },
+  {
+    "id": "tool-007",
+    "title": "OpenTelemetry Collector Architecture: Receivers, Processors & Exporters",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A company instrumented 200 microservices using OpenTelemetry. Microservices export traces and metrics directly to vendor SaaS endpoints over public internet connections. Under peak traffic, microservices drop traces due to network timeouts, and egress bandwidth costs surge.",
+    "question": "What is the OpenTelemetry (OTel) Collector, how does its pipeline pipeline architecture (Receivers, Processors, Exporters) decouple applications from backends, and how does the `batch` processor protect backend ingestion?",
+    "hints": [
+      "The Collector acts as a vendor-agnostic proxy that receives, processes, and exports telemetry.",
+      "The `batch` processor groups individual spans into bulk payloads before transmitting."
+    ],
+    "answer": "1. **OTel Collector Architecture:**\nThe OpenTelemetry Collector is an out-of-process proxy deployed as a sidecar, DaemonSet, or gateway cluster. It consists of 3 sequential pipeline stages:\n- **Receivers:** Ingest telemetry in various formats (OTLP via gRPC/HTTP on 4317/4318, Jaeger, Zipkin, Prometheus pull/push).\n- **Processors:** Transform telemetry in flight (filtering sensitive PII data, metric renaming, tail-based sampling, batching).\n- **Exporters:** Translate and transmit data to one or more storage backends (Jaeger, Prometheus, Datadog, AWS CloudWatch, Tempo).\n\n2. **The Mandatory `batch` Processor:**\nApplications generate thousands of tiny individual spans. Sending each span as an independent HTTP request creates massive TCP overhead and crushes backends. The `batch` processor buffers spans in memory:\n```yaml\nprocessors:\n  batch:\n    send_batch_size: 8192\n    timeout: 1s\n    send_batch_max_size: 10240\n```\nBatches spans into bulk compressed gRPC payloads, reducing network calls and egress bandwidth by up to 80%.\n\n3. **Key Benefit:** Switch observability vendors with zero application code changes; simply edit the collector exporter YAML.",
+    "pitfalls": "Deploying the OTel Collector pipeline without placing the `memory_limiter` processor before the `batch` processor. Under severe spikes, unbounded collector buffers will trigger an OOM crash.",
+    "key_takeaway": "Deploy OpenTelemetry Collectors to decouple applications from vendors, and always place `memory_limiter` and `batch` processors in every telemetry pipeline."
+  },
+  {
+    "id": "tool-008",
+    "title": "Distributed Tracing: Context Propagation & Baggage API vs TraceState",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "An API Gateway extracts an incoming HTTP header `tenant-id: acme-corp`. Five microservices deep down the synchronous RPC call chain, a database logger needs to log the `tenant-id`. Developers are considering adding `tenant_id` to every intermediate gRPC message definition.",
+    "question": "What is the OpenTelemetry Baggage API, how does it propagate business metadata alongside distributed trace context, and what security caution must be exercised with Baggage size and visibility?",
+    "hints": [
+      "Baggage propagates key-value pairs across process boundaries along the W3C context wire.",
+      "Unlike span attributes, Baggage is forwarded to all downstream services."
+    ],
+    "answer": "1. **The Purpose of the Baggage API:**\nWhile distributed tracing passes `traceparent` (Trace ID and Span ID) to correlate spans, the **Baggage API** allows engineers to pass **arbitrary contextual key-value pairs** across microservices without modifying intermediate RPC method signatures.\n\n2. **How It Works Across Wire (W3C `baggage` Header):**\n- **Service A (Gateway):**\n```javascript\nimport { baggageUtils } from '@opentelemetry/core';\nconst baggage = otel.baggage.setEntry(context.active(), 'tenant.id', { value: 'acme-corp' });\n```\nOutgoing HTTP request includes header: `baggage: tenant.id=acme-corp`.\n- **Service E (Deep Downstream):**\n```go\nentry := baggage.FromContext(ctx).Member(\"tenant.id\")\nfmt.Println(\"Tenant ID is:\", entry.Value())\n```\n\n3. **Security & Performance Pitfall:**\n- Baggage values are transmitted over HTTP/gRPC headers on **every single outbound call** made by any downstream service.\n- Storing large objects or high-volume keys bloats network header bandwidth.\n- **Sensitive Data:** If a downstream service calls a third-party external webhook, the `baggage` header will be transmitted to the external vendor unless explicitly scrubbed, leaking internal identifiers.",
+    "pitfalls": "Storing confidential data (auth tokens, passwords, PII) in Baggage. Baggage is transported in plaintext HTTP headers across all downstream network hops.",
+    "key_takeaway": "Use the OpenTelemetry Baggage API to propagate lightweight operational metadata across microservices, but scrub baggage headers before calling external third-party APIs."
+  },
+  {
+    "id": "tool-009",
+    "title": "Grafana Loki & LogQL: Stream-Based Indexing vs Elasticsearch",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate",
+    "scenario": "A company's Elasticsearch cluster consumes 12TB of SSD storage and 128GB of RAM to maintain full-text Lucene inverted indexes for 50 microservices. The SRE team evaluates Grafana Loki as a cost-effective alternative.",
+    "question": "How does Grafana Loki's indexing philosophy ('like Prometheus for logs') differ from Elasticsearch/OpenSearch full-text indexing, what are streams and labels in Loki, and how does LogQL execute queries?",
+    "hints": [
+      "Elasticsearch indexes every single word in the log message.",
+      "Loki indexes only the metadata labels and compresses raw log chunks in object storage (S3)."
+    ],
+    "answer": "1. **Elasticsearch vs Grafana Loki Architecture:**\n- **Elasticsearch / Lucene:** Builds a massive inverted index of **every single word** in every log line. *Pros:* Instant full-text search across petabytes. *Cons:* Enormous memory footprint, high CPU indexing cost, index files often equal or exceed the raw log data size.\n- **Grafana Loki:** Adopts the Prometheus philosophy. It does **not** index the log text at all! It indexes only **metadata labels** (e.g. `{namespace=\"prod\", app=\"checkout\"}`). The raw log lines are compressed into gzip chunks and stored directly in cheap cloud object storage (AWS S3, Google Cloud Storage).\n\n2. **Log Streams & Chunks:**\nA unique combination of labels defines a **Stream**. Log entries for a stream are grouped into 2MB chunks. Storage cost drops by up to 90% compared to Elasticsearch.\n\n3. **LogQL Query Execution:**\n- Label Selector (fast index lookup): `{app=\"checkout\", env=\"prod\"}` narrows search to specific chunk pointers.\n- Line Filter (brute-force grep): `|= \"connection reset\" | json | status >= 500`.\nLoki distributes the chunk reading across hundreds of worker nodes (`queriers`), scanning gigabytes of compressed logs in parallel using multi-core grep.",
+    "pitfalls": "Adding dynamic identifiers (like `user_id` or `ip_address`) as Loki stream labels. Just like Prometheus, this creates a stream cardinality explosion that crashes Loki.",
+    "key_takeaway": "Loki indexes only metadata labels and stores compressed chunks in S3, delivering 90% cheaper storage than Elasticsearch while using LogQL for distributed grep."
+  },
+  {
+    "id": "tool-010",
+    "title": "Linux Networking Diagnostics: ss vs netstat & Socket Queue Depths",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate",
+    "scenario": "A production server running 50,000 concurrent TCP connections experiences packet drops. An engineer runs `netstat -an` and the command hangs for 45 seconds, printing thousands of lines while consuming high kernel CPU. A senior SRE uses `ss` instead and diagnoses the socket buffer bottleneck in 200 milliseconds.",
+    "question": "Why is `netstat` deprecated and slow compared to `ss` (Socket Statistics), how does `ss` query kernel netlink sockets, and what do `Recv-Q` and `Send-Q` indicate for listening sockets vs established sockets?",
+    "hints": [
+      "`netstat` parses `/proc/net/tcp` line-by-line in user space; `ss` uses the kernel `sock_diag` netlink interface.",
+      "For listening sockets, `Recv-Q` indicates the current backlog of completed TCP handshakes waiting for `accept()`."
+    ],
+    "answer": "1. **Why `netstat` is Deprecated and Slow:**\n`netstat` reads `/proc/net/tcp` and `/proc/net/tcp6`. On servers with 50,000+ sockets, the kernel must format massive text strings in `/proc`, and user space must parse text line-by-line. `ss` uses the Linux kernel **`sock_diag` Netlink subsystem**, transferring binary data structures directly via kernel sockets in milliseconds without text formatting overhead.\n\n2. **Crucial Meaning of `Recv-Q` and `Send-Q`:**\nTheir meaning changes completely based on socket state!\n- **For Established Sockets (`State == ESTAB`):**\n  - `Recv-Q`: Number of bytes received by the kernel but not yet read by the application via `read()`.\n  - `Send-Q`: Number of bytes sent by the app but not yet acknowledged (ACKed) by the remote peer.\n- **For Listening Sockets (`State == LISTEN` - run `ss -tlpn`):**\n  - `Send-Q`: The **maximum listen backlog capacity** (configured via `listen(backlog)` or `somaxconn`).\n  - `Recv-Q`: The **current number of completed 3-way TCP connections waiting in the accept queue** to be picked up by the application `accept()`. If `Recv-Q == Send-Q`, the application is too slow, and incoming client connections are being dropped with SYN floods!",
+    "pitfalls": "Interpreting `Recv-Q` on a listening socket as unread bytes. On a listening socket, it represents pending queued client connections waiting for `accept()`.",
+    "key_takeaway": "Use `ss -tlpn` instead of `netstat`. When `Recv-Q` approaches `Send-Q` on listening sockets, your application event loop is blocking and failing to call `accept()` fast enough."
+  },
+  {
+    "id": "tool-011",
+    "title": "Linux Memory & CPU Diagnostics: vmstat, iostat & Page Faults",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Linux server hosting a database experiences a sudden drop in transaction throughput. Running `top` shows 90% CPU `wa` (iowait) and 0% idle. The team wants to determine whether disk I/O latency or memory paging/swapping is choking the server.",
+    "question": "What is the difference between Minor and Major Page Faults, what do columns `r`, `b`, `si`, `so` represent in `vmstat 1`, and how does `iostat -xz 1` identify physical disk saturation?",
+    "hints": [
+      "Major page faults read data from physical disk; minor page faults allocate memory without disk I/O.",
+      "High `b` in vmstat indicates processes blocked in uninterruptible sleep (D state)."
+    ],
+    "answer": "1. **Minor vs Major Page Faults:**\n- **Minor Page Fault:** The memory page is already in physical RAM (e.g. shared library or cache) or newly allocated zero-fill; the kernel simply updates the MMU page table. Fast, zero disk I/O.\n- **Major Page Fault:** The requested memory page is **not in RAM** (must be fetched from disk swap space or a mapped file). Forces the thread into uninterruptible sleep (`D` state) while waiting for slow disk I/O.\n\n2. **Decoding `vmstat 1`:**\n- `r`: Number of runnable processes waiting for CPU.\n- `b`: Number of processes blocked in uninterruptible sleep (`D` state), typically waiting for disk or network I/O. If `b > 5`, disk bottleneck is confirmed!\n- `si` / `so` (Swap In / Swap Out): If `si` or `so` are $>0$, the system has run out of physical RAM and is actively swapping memory pages to disk, causing massive latency.\n\n3. **Pinpointing Disk Saturation with `iostat -xz 1`:**\n- `%util`: Percentage of time the disk device was busy handling requests. If `%util > 95%`, the physical drive is saturated.\n- `await`: Average time (in ms) for I/O requests to be served. On NVMe SSDs, `await` should be $< 1\\text{ms}$. If `await > 50\\text{ms}`, disk queue is severely backed up.",
+    "pitfalls": "Confusing `wa` (iowait) with CPU compute usage. High iowait means the CPU is completely idle and waiting for disk controllers to finish reading data.",
+    "key_takeaway": "Use `vmstat 1` to check blocked processes (`b`) and swapping (`si`/`so`), and `iostat -xz 1` to verify if physical disk `%util` and `await` are saturated."
+  },
+  {
+    "id": "tool-012",
+    "title": "eBPF in Observability: bpftrace, BCC & Kernel Block I/O Tracing",
+    "domain": "Tools & Observability",
+    "difficulty": "Advanced",
+    "scenario": "A cloud server experiences random 200ms latency spikes once every 5 minutes. Application logs and network metrics show nothing unusual. Standard tools (`top`, `iotop`) show low average usage because the 200ms spike is smoothed out by 1-second sampling intervals.",
+    "question": "What is eBPF (Extended Berkeley Packet Filter), why does it provide zero-overhead kernel instrumentation, and how does the BCC tool `biosnoop` or `biolatency` isolate kernel block I/O latency anomalies?",
+    "hints": [
+      "eBPF runs sandboxed bytecode inside the Linux kernel on hardware/software events without modifying kernel source.",
+      "`biolatency` outputs a microsecond-level latency histogram of all disk I/O requests."
+    ],
+    "answer": "1. **What is eBPF?**\neBPF allows running sandboxed, verifier-guaranteed safe bytecode directly inside the Linux kernel at runtime without kernel modules or reboots. Programs attach to kprobes, tracepoints, or socket filters. They execute in nanoseconds and aggregate metrics in kernel-space eBPF maps, eliminating user-space context switching overhead.\n\n2. **Diagnosing the 200ms Spike (`biolatency` & `biosnoop`):**\n- **`biolatency -m 10`:**\nTraces block I/O requests and outputs a logarithmic histogram of disk device latency:\n```text\nmsecs               : count     distribution\n0 -> 1              : 14205     |************************************|\n2 -> 3              : 85        |\n64 -> 127           : 0         |\n128 -> 255          : 12        |*                                   |\n```\nInstantly confirms that 12 disk requests suffered latency between 128ms and 255ms!\n- **`biosnoop`:** Prints every single block I/O request with PID, process name, disk sector, and latency: pinpointing that a periodic Linux page cache writeback (`kworker/flush`) was dumping dirty buffers to an overloaded EBS volume.",
+    "pitfalls": "Using `iotop` to find disk latency spikes. `iotop` polls `/proc` periodically and misses sub-second disk latency anomalies that eBPF captures deterministically.",
+    "key_takeaway": "Use eBPF tools (`biolatency`, `biosnoop`) to diagnose latency anomalies inside kernel subsystems without user-space polling overhead."
+  },
+  {
+    "id": "tool-013",
+    "title": "Continuous Profiling in Production: Pyroscope & Parca eBPF Profilers",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A performance bug causes a 30% CPU regression in production, but only occurs for 2 minutes at 4:00 AM when high-volume enterprise data syncs run. By the time on-call engineers SSH into the server in the morning, CPU usage is back to normal, leaving no clues in standard APM traces.",
+    "question": "What is Continuous Profiling, how does it differ from traditional on-demand pprof profiling, and how do modern eBPF profilers (Pyroscope, Parca) capture CPU stack traces across multiple languages with near-zero overhead?",
+    "hints": [
+      "Traditional profiling is manual and triggered on-demand; continuous profiling records stack traces 24/7.",
+      "eBPF profilers sample the CPU instruction pointer 100 times per second across kernel and user space."
+    ],
+    "answer": "1. **The Limitation of On-Demand Profiling:**\nTools like Go `pprof` or Node `v8-profiler` require an engineer to manually trigger profiling while the incident is actively happening. If an incident lasts 90 seconds in the middle of the night, on-demand profiling is impossible.\n\n2. **What is Continuous Profiling?**\nContinuous profiling records CPU, memory, and lock contention stack traces continuously 24/7/365 across the entire fleet:\n- Samples call stacks periodically (e.g. 19Hz or 99Hz: 99 times per second).\n- Aggregates call stacks into compact tree structures (folded stack format).\n- Transmits data to a central storage engine (Grafana Pyroscope or Parca) where engineers can travel back in time to 4:00 AM and view a Flame Graph of the exact CPU consumers during the 2-minute incident.\n\n3. **The eBPF Profiling Revolution:**\nModern eBPF profilers (like Parca / Pyroscope eBPF agent) attach an eBPF program to the CPU hardware clock:\n- Samples kernel and user-space stacks directly from the Linux kernel.\n- Requires **zero SDKs, zero code changes, and zero runtime recompilation** across Go, Rust, C++, Java, and Node.js with <1% CPU overhead.",
+    "pitfalls": "Assuming distributed tracing replaces profiling. Tracing tells you *which microservice* was slow; profiling tells you *which line of code and CPU instruction* caused the slowdown.",
+    "key_takeaway": "Adopt continuous profiling (Pyroscope / Parca) to capture historical flame graphs of fleeting CPU and memory spikes 24/7 with under 1% overhead."
+  },
+  {
+    "id": "tool-014",
+    "title": "TCP Packet Analysis: tcpdump Filters & Dissecting Handshake/RST Flags",
+    "domain": "Tools & Observability",
+    "difficulty": "Advanced",
+    "scenario": "A microservice experiences intermittent `Connection reset by peer` errors when connecting to a remote payment gateway. Application logs show nothing helpful. An engineer captures packets on the production network interface using `tcpdump`.",
+    "question": "What `tcpdump` filter expressions capture only TCP SYN, FIN, and RST packets, and how do you distinguish whether an RST flag was generated by the remote server application vs an intermediate stateful firewall / NAT gateway?",
+    "hints": [
+      "`tcpdump -nn 'tcp[tcpflags] & (tcp-rst) != 0'` captures RST packets.",
+      "Check IP TTL (Time To Live) and TCP window size to identify firewall injection."
+    ],
+    "answer": "1. **Targeted `tcpdump` Filters:**\nNever capture raw traffic without filters on high-throughput interfaces (it will flood disk space and drop packets). Use targeted TCP flag filters:\n- **Capture SYN, FIN, RST packets only:**\n```bash\ntcpdump -nn -i eth0 'tcp[tcpflags] & (tcp-syn|tcp-fin|tcp-rst) != 0 and host 198.51.100.1'\n```\n- **Save to PCAP for Wireshark analysis:**\n```bash\ntcpdump -nn -i eth0 -s 96 -w trace.pcap port 443\n```\n(`-s 96` captures only the 96-byte packet header, preserving privacy and shrinking file size by 95%).\n\n2. **Detecting Intermediate Firewall / NAT RST Injection:**\nWhen an RST arrives, examine the packet headers:\n- **IP TTL (Time to Live):** If legitimate server traffic arrives with `TTL = 54` (e.g., initial 64 minus 10 router hops), but the RST packet arrives with `TTL = 64` or `TTL = 255`, the RST was **injected by an intermediate firewall/proxy**, not the end server!\n- **TCP Window Size:** Firewalls often set `Window Size = 0` on forged RST packets.\n- **ACK Sequence:** An RST sent by a terminating app matches the expected sequence number; a middlebox out-of-state RST often uses SEQ 0.",
+    "pitfalls": "Running `tcpdump -i any` without limiting packet snap length (`-s`) on production hosts handling gigabit traffic. It can fill disk partitions in minutes.",
+    "key_takeaway": "Use `tcpdump` with flag filters to capture connection anomalies, and inspect IP TTL to determine if resets originate from middlebox firewalls or the application."
+  },
+  {
+    "id": "tool-015",
+    "title": "Linux File Descriptors & Socket Tuning: ulimit -n vs fs.file-max",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A high-concurrency reverse proxy handles 80,000 active WebSocket connections. The application suddenly crashes with `socket: too many open files`. An engineer runs `ulimit -n 100000` in their terminal, but after the system rebooted or the service was restarted via systemd, the error immediately reoccurred.",
+    "question": "What is the difference between per-process file descriptor limits (`ulimit -n`) and system-wide limits (`fs.file-max`), and why does setting `ulimit` in a shell fail to apply to systemd services or Docker containers?",
+    "hints": [
+      "systemd ignores `/etc/security/limits.conf` and requires `LimitNOFILE` in the unit file.",
+      "Docker/Kubernetes containers inherit limits from the container runtime default or `default-ulimits`."
+    ],
+    "answer": "1. **System-Wide vs Per-Process Limits:**\n- **System-Wide (`fs.file-max` / `fs.nr_open`):** Configured via `/etc/sysctl.conf`. Governs the total number of open file descriptors allowed across all processes in the entire Linux kernel.\n- **Per-Process Limit (`ulimit -n`):** Governs the maximum open file descriptors (sockets, pipes, files) for a single process.\n\n2. **Why Terminal `ulimit` Failed:**\n- `ulimit` commands in a bash session only apply to that specific shell session and child processes spawned from it.\n- **systemd Services:** Ignore shell profiles and `/etc/security/limits.conf`. You must configure `LimitNOFILE` inside the systemd unit file:\n```ini\n[Service]\nLimitNOFILE=1048576\n```\n- **Docker / Kubernetes Containers:** Containers run under `containerd`/Docker. Configure `/etc/docker/daemon.json` with `\"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } }` or in Kubernetes Pod manifest:\n```yaml\nsecurityContext:\n  sysctls:\n  - name: fs.file-max\n    value: \"2097152\"\n```",
+    "pitfalls": "Setting per-process `LimitNOFILE` higher than the kernel system limit `fs.nr_open`. The kernel will reject the request and fall back to the default 1,024 limit.",
+    "key_takeaway": "Configure `LimitNOFILE` in systemd unit files and container runtime configs, and verify `fs.file-max` and `fs.nr_open` in sysctl to support 100,000+ open sockets."
+  },
+  {
+    "id": "tool-016",
+    "title": "Database Observability: pg_stat_statements & EXPLAIN (ANALYZE, BUFFERS)",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A PostgreSQL database experiences 100% CPU usage. The slow query log is disabled to save disk. An engineer runs `EXPLAIN SELECT ...` on a slow query and observes an index scan, concluding that the query is already optimized, yet it takes 4 seconds in production.",
+    "question": "How does PostgreSQL's `pg_stat_statements` module track query performance without logging overhead, and why is `EXPLAIN (ANALYZE, BUFFERS)` critical to reveal disk buffer cache misses?",
+    "hints": [
+      "`EXPLAIN` only shows query planner cost estimates; `EXPLAIN ANALYZE` actually executes the query.",
+      "`BUFFERS` shows shared buffer cache hits vs physical disk reads."
+    ],
+    "answer": "1. **`pg_stat_statements` (The Gold Standard):**\nInstead of parsing slow query log text files, `pg_stat_statements` tracks execution statistics inside database shared memory:\n```sql\nSELECT query, calls, total_exec_time / calls AS avg_ms, rows / calls AS avg_rows\nFROM pg_stat_statements\nORDER BY total_exec_time DESC\nLIMIT 5;\n```\nNormalizes queries (replaces parameters with `$1`), tracking total calls, CPU time, and buffer hits with $<1\\%$ performance overhead.\n\n2. **Why Plain `EXPLAIN` Was Misleading:**\n- Plain `EXPLAIN` shows only the **optimizer's static mathematical model estimate**; it does not run the query.\n- `EXPLAIN ANALYZE` **executes the query** and displays real execution timing.\n\n3. **The Importance of `BUFFERS`:**\nAlways run `EXPLAIN (ANALYZE, BUFFERS) SELECT ...`:\n- `Buffers: shared hit=1420`: Read from RAM (PostgreSQL shared buffer pool). Fast (0.1ms).\n- `Buffers: shared read=8500`: Read from physical disk (EBS/NVMe). Extremely slow (4,000ms).\nAn Index Scan that must read 8,500 un-cached index pages from disk will be excruciatingly slow even though it uses an index!",
+    "pitfalls": "Running `EXPLAIN ANALYZE` on destructive queries (`DELETE` or `UPDATE`). It actually executes the command and modifies database rows! Wrap in a transaction and rollback (`BEGIN; EXPLAIN ANALYZE ...; ROLLBACK;`).",
+    "key_takeaway": "Monitor query bottlenecks using `pg_stat_statements`, and always use `EXPLAIN (ANALYZE, BUFFERS)` to distinguish memory cache hits from slow physical disk reads."
+  },
+  {
+    "id": "tool-017",
+    "title": "Kubernetes Observability: kube-state-metrics vs metrics-server vs cAdvisor",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate",
+    "scenario": "A team installs Prometheus in their Kubernetes cluster. They notice metrics like `container_cpu_usage_seconds_total`, `kube_pod_status_phase`, and `node_cpu_seconds_total` all come from different endpoints. A developer asks why they need both `kube-state-metrics` and `metrics-server`.",
+    "question": "What are the distinct responsibilities of (1) cAdvisor, (2) kube-state-metrics (KSM), and (3) metrics-server in Kubernetes observability, and why does Prometheus scrape KSM instead of metrics-server?",
+    "hints": [
+      "cAdvisor measures resource utilization of containers (CPU, RAM).",
+      "kube-state-metrics translates Kubernetes object state (Deployment desired replicas, Pod phases) into Prometheus metrics."
+    ],
+    "answer": "1. **The Three Roles:**\n\n- **1. cAdvisor (Container Advisor):**\n  - Embedded directly inside the **kubelet** binary on every node.\n  - Interacts directly with Linux cgroups to measure physical resource consumption: container CPU, memory usage, network interface bytes, disk I/O.\n  - Metric format: `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`.\n\n- **2. kube-state-metrics (KSM):**\n  - A standalone deployment that listens to the **Kubernetes API Server**.\n  - Does not measure CPU or RAM. Instead, it translates the **status and configuration of Kubernetes objects** into Prometheus metrics.\n  - Metric format: `kube_pod_status_phase`, `kube_deployment_status_replicas_available`, `kube_pod_container_resource_limits`.\n\n- **3. metrics-server:**\n  - Lightweight in-memory aggregator used exclusively by the Kubernetes internal control plane for autoscaling (`kubectl top` and HPA).\n  - Does not store historical time-series data and does not expose a standard Prometheus scrape format.\n\n2. **Prometheus Setup:** Prometheus scrapes **cAdvisor** (for physical resource metrics) and **kube-state-metrics** (for object lifecycle state), completely ignoring `metrics-server`.",
+    "pitfalls": "Trying to configure Prometheus to scrape `metrics-server`. `metrics-server` is meant for Kubernetes internal HPA autoscaling, not long-term Prometheus telemetry.",
+    "key_takeaway": "cAdvisor provides container cgroup resource metrics, kube-state-metrics provides Kubernetes API object state for Prometheus, and metrics-server powers internal HPA."
+  },
+  {
+    "id": "tool-018",
+    "title": "TCP TIME_WAIT & Connection Churn: tcp_tw_reuse vs tcp_tw_recycle",
+    "domain": "Tools & Observability",
+    "difficulty": "Advanced",
+    "scenario": "A high-throughput API gateway creates and destroys 15,000 short-lived HTTP connections per second to an upstream service. Sockets accumulate in `TIME_WAIT` state until ephemeral ports are exhausted (`EADDRNOTAVAIL`). An engineer finds an old blog post advocating `sysctl -w net.ipv4.tcp_tw_recycle=1`. When applied, all clients behind NAT routers are completely blocked from connecting.",
+    "question": "What is the purpose of the 60-second TCP `TIME_WAIT` state, why was `tcp_tw_recycle` permanently removed from modern Linux kernels (post-4.12), and how does `tcp_tw_reuse` safely mitigate port exhaustion?",
+    "hints": [
+      "`TIME_WAIT` prevents delayed duplicate packets from corrupting new connections with the same 4-tuple.",
+      "`tcp_tw_recycle` broke all clients behind shared corporate NAT routers due to timestamp mismatches."
+    ],
+    "answer": "1. **The Purpose of `TIME_WAIT` (2MSL):**\nWhen a TCP connection closes, the active closer enters `TIME_WAIT` for 2 Maximum Segment Lifetimes ($2 \\times 30\\text{s} = 60\\text{s}$):\n- Guarantees the final `ACK` is received by the peer.\n- Ensures any delayed, duplicated packets wandering the internet expire before the exact same 4-tuple `(srcIP, srcPort, dstIP, dstPort)` is reused for a new connection.\n\n2. **Why `tcp_tw_recycle` Was Disastrous and Removed:**\n`tcp_tw_recycle` checked the TCP timestamp option (`PAWS` - Protection Against Wrapped Sequence Numbers). If an incoming packet had a timestamp older than the last packet seen from that IP, it was dropped.\n**The NAT Problem:** When thousands of users sit behind a corporate NAT or cellular proxy, they share the same public IP but have unsynchronized internal clocks. As a result, random packets from different devices were continuously discarded, completely breaking connectivity. It was **removed in Linux kernel 4.12**.\n\n3. **The Safe Solution: `tcp_tw_reuse`:**\nSet `net.ipv4.tcp_tw_reuse = 1` in `/etc/sysctl.conf`:\n- Safely allows reusing `TIME_WAIT` sockets for **outgoing client connections** if the timestamp is monotonically higher, without impacting incoming connections or breaking NAT clients.",
+    "pitfalls": "Enabling `tcp_tw_recycle` on legacy Linux kernels. It will silently drop incoming TCP SYN packets from cellular and NAT clients.",
+    "key_takeaway": "Never use deprecated `tcp_tw_recycle`. Enable `net.ipv4.tcp_tw_reuse = 1` and expand the ephemeral port range (`net.ipv4.ip_local_port_range`) to handle connection churn safely."
+  },
+  {
+    "id": "tool-019",
+    "title": "Linux Core Dumps & Segfault Debugging: coredumpctl and GDB",
+    "domain": "Tools & Observability",
+    "difficulty": "Advanced",
+    "scenario": "A Go binary using CGO or a C++ production daemon crashes intermittently with `Segmentation fault (core dumped)`. The process exits instantly with exit code 139 ($128 + 11$). No stack traces are written to application log files.",
+    "question": "How do you configure Linux OS limits to capture full core dumps, and how do you use `coredumpctl` and `gdb` (GNU Debugger) to inspect the call stack, register states, and variable contents at the exact microsecond of the crash?",
+    "hints": [
+      "Core dumps are disabled by default (`ulimit -c 0`).",
+      "`gdb <binary> <core-file>` followed by `bt` (backtrace) displays the crash stack."
+    ],
+    "answer": "1. **Enabling Core Dumps:**\nBy default, Linux sets core file size to 0. Enable it:\n```bash\nulimit -c unlimited\n```\nConfigure the core pattern in `/etc/sysctl.conf`:\n```conf\nkernel.core_pattern = /var/crash/core.%e.%p.%t\n```\nOr rely on systemd's built-in `systemd-coredump`.\n\n2. **Inspecting with `coredumpctl`:**\nRun `coredumpctl list` to view recent segfaults:\n```bash\ncoredumpctl info <PID>\n```\nInstantly opens the crash summary, displaying the signal (`SIGSEGV`), faulting instruction, and crashing thread.\n\n3. **Analyzing in GDB:**\nLaunch GDB directly on the crash snapshot:\n```bash\ncoredumpctl debug <PID>\n# Or manually: gdb /usr/local/bin/my-app /var/crash/core.my-app.1234\n```\n- Run **`bt` (backtrace)** or **`bt full`**: Displays the exact C/Go function call stack leading to the crash.\n- Run **`info registers`**: Shows CPU register states (e.g. `rax = 0x0` confirms a null pointer dereference).\n- Run **`thread apply all bt`**: Inspects call stacks across all active threads at the moment of termination.",
+    "pitfalls": "Stripping all debug symbols (`-s`) from production binaries before saving the unstripped symbol file. Without debug symbols, GDB can only show raw memory addresses instead of function names and line numbers.",
+    "key_takeaway": "Enable core dumps (`ulimit -c unlimited`), and use `coredumpctl debug` and GDB (`bt full`) to post-mortem analyze segfaults at the exact crashing instruction."
+  },
+  {
+    "id": "tool-020",
+    "title": "Container Runtime Auditing: Falco eBPF Threat Detection & Trivy",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A malicious actor exploits a vulnerability in a public-facing web container, executes an interactive shell (`/bin/sh`), and attempts to dump the Kubernetes service account token from `/var/run/secrets/kubernetes.io/serviceaccount/token`. Static image scanners found zero CVEs during the CI build.",
+    "question": "Why do static container image vulnerability scanners (like Trivy) fail to detect active runtime intrusions, and how does Falco use eBPF kernel event streams to alert on unauthorized terminal spawns and credential access?",
+    "hints": [
+      "Trivy scans static packages and dependencies for known CVEs before deployment.",
+      "Falco monitors live Linux system calls at the kernel layer using eBPF."
+    ],
+    "answer": "1. **Static Scanning vs Runtime Threat Detection:**\n- **Static Scanning (Trivy / Grype):** Scans container image layers in CI/CD against vulnerability databases (CVEs). *Limitation:* Blind to zero-day exploits, runtime misconfigurations, stolen credentials, or attackers executing valid binaries already inside the container.\n- **Runtime Auditing (Falco):** Monitors live behavioral activity inside the Linux kernel on production hosts.\n\n2. **How Falco Works with eBPF:**\nFalco loads an eBPF driver into the host kernel that intercepts all system calls (`execve`, `openat`, `socket`, `ptrace`):\n- Enforces declarative behavioral rules in YAML:\n```yaml\n- rule: Terminal shell in container\n  desc: A shell was spawned by a container with an attached terminal\n  condition: container and evt.type = execve and proc.name in (bash, sh, zsh)\n  output: \"[SECURITY ALERT] Shell spawned in container (user=%user.name container=%container.info)\"\n  priority: WARNING\n```\nWhen the attacker invokes `/bin/sh`, Falco intercepts the `execve` syscall in the kernel within nanoseconds and dispatches an alert to Slack / SIEM or triggers automated pod eviction via a Falco sidekick.",
+    "pitfalls": "Relying purely on static image scanning in CI and having zero runtime threat visibility inside production Kubernetes clusters.",
+    "key_takeaway": "Pair static vulnerability scanning (Trivy) in CI with eBPF runtime syscall auditing (Falco) to catch live terminal spawns and credential exfiltration."
   }
 ]
