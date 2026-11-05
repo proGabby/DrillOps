@@ -1,0 +1,47 @@
+[
+  {
+    "id": "go-001",
+    "title": "Goroutine Leak with Unbuffered Channels & Context Timeout",
+    "domain": "Backend with Go",
+    "difficulty": "Advanced",
+    "scenario": "A high-throughput HTTP handler calls three external partner APIs concurrently and returns the first successful response to the user. When load testing at 2,000 req/sec, service memory climbs linearly until the host crashes, even though context timeouts are strictly set to 500ms.",
+    "question": "Analyze the snippet below. Why does this create a massive goroutine and memory leak, and what single change fixes it?\n\n```go\nfunc fetchFastest(ctx context.Context, urls []string) (string, error) {\n    ch := make(chan string)\n    for _, url := range urls {\n        go func(u string) {\n            resp, err := httpGet(ctx, u)\n            if err == nil {\n                ch <- resp\n            }\n        }(url)\n    }\n    select {\n    case res := <-ch:\n        return res, nil\n    case <-ctx.Done():\n        return \"\", ctx.Err()\n    }\n}\n```",
+    "hints": [
+      "What happens to the remaining goroutines trying to send to `ch` once the first response is received?",
+      "Unbuffered channel sends block until another goroutine receives."
+    ],
+    "answer": "1. **Root Cause:**\n`ch := make(chan string)` is an unbuffered channel. The `select` statement returns as soon as the first goroutine writes to `ch` OR when `ctx.Done()` fires. Once `fetchFastest` returns, there are no more active receivers on `ch`.\n\nAll slower goroutines that complete their `httpGet` call will execute `ch <- resp` and **block forever** because no one will ever read from `ch` again. The Go runtime cannot garbage collect a blocked goroutine, leading to memory exhaustion.\n\n2. **The Fix:**\nUse a buffered channel with capacity equal to the number of launched goroutines:\n```go\nch := make(chan string, len(urls))\n```\nWith a buffered channel, the remaining goroutines can write to the buffer and exit immediately, allowing the GC to clean up their stack and heap allocations. Alternatively, pass `ctx` to `select` within each goroutine before sending to `ch`.",
+    "pitfalls": "Relying purely on `ctx` cancellation inside `httpGet` does not guarantee non-blocking channel sends if the request finished right as the parent timeout expired.",
+    "key_takeaway": "When fanning out concurrent workers where only a subset of results are collected, always buffer the return channel to match worker count (`len(urls)`)."
+  },
+  {
+    "id": "go-002",
+    "title": "Slice Appends & Hidden Heap Escapes in Hot Paths",
+    "domain": "Backend with Go",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "During profiling with `pprof` (alloc_space), your Go microservice shows 70% of allocations originating from a utility function that extracts user IDs from database row structs and returns a slice `[]int64`.",
+    "question": "What causes unexpected heap allocations when constructing slices in a loop, how do you verify stack vs. heap escape analysis using the Go compiler, and how do you achieve zero-allocation slice building?",
+    "hints": [
+      "`go build -gcflags=\"-m\"` reveals compiler escape analysis decisions.",
+      "Consider `make([]T, 0, cap)` vs `make([]T, cap)` vs `var s []T`."
+    ],
+    "answer": "1. **Root Cause:**\nDeclaring `var ids []int64` or `ids := []int64{}` and using `append()` without pre-allocation causes multiple slice reallocations. Whenever capacity is exceeded, Go allocates a new array in the heap (typically 2x or 1.25x size), copies elements over, and leaves the old backing array for the GC.\n\n2. **Escape Analysis Verification:**\nRun:\n```bash\ngo build -gcflags=\"-m -m\" ./cmd/server\n```\nLook for output like `... moved to heap: ids` or `make([]int64, 0) escapes to heap`.\n\n3. **Optimization (Pre-allocation):**\nIf the row count `n` is known:\n```go\nids := make([]int64, 0, len(rows))\nfor _, r := range rows {\n    ids = append(ids, r.ID)\n}\n```\nThis guarantees a single backing array allocation. In extreme hot loops, using a `sync.Pool` of slice buffers avoids heap allocations entirely across requests.",
+    "pitfalls": "Doing `ids := make([]int64, len(rows))` followed by `ids = append(ids, r.ID)` creates a slice of length `2 * len(rows)` with leading zero values.",
+    "key_takeaway": "Always specify slice capacity `make([]T, 0, expectedCap)` when the upper bound is known to avoid repeated GC heap thrashing."
+  },
+  {
+    "id": "go-003",
+    "title": "sync.RWMutex Contention & Reader Starvation",
+    "domain": "Backend with Go",
+    "difficulty": "Advanced",
+    "scenario": "An in-memory cache in Go protects a `map[string]Item` using `sync.RWMutex`. Under a read-heavy workload (99% reads, 1% periodic writes every 10ms), read latency degrades severely from 0.1ms to 80ms on a 32-core VM.",
+    "question": "How does Go's `sync.RWMutex` implementation handle pending write locks relative to subsequent read locks, why does frequent lock cycling degrade on many-core CPUs, and what alternative data structures provide lock-free or partitioned concurrency?",
+    "hints": [
+      "Go's RWMutex is write-preferring to prevent writer starvation.",
+      "Cache line bouncing on atomic counters occurs when 32 cores fight over the same mutex struct."
+    ],
+    "answer": "1. **Mechanism:**\nGo's `sync.RWMutex` is **write-preferring**. When a goroutine calls `Lock()` (write lock), all future calls to `RLock()` (read locks) will block and wait for the writer to complete, preventing writers from starving.\n\n2. **Multi-core Bottleneck:**\nEven for reads (`RLock`), the CPU must execute atomic operations (e.g. `atomic.AddInt32` on the reader count). On 32+ cores, this forces cache line invalidations across L1/L2 caches (known as cache line bouncing), causing memory bus stalls.\n\n3. **Solutions:**\n- **Sharded / Striped Maps:** Partition the keys into N shards (e.g. `shards := make([]Shard, 32)` with hash(key) % 32), each with its own RWMutex.\n- **`sync.Map`:** Specifically optimized for read-mostly keys and disjoint reads/writes.\n- **Copy-on-Write (`atomic.Pointer`):** If writes are periodic, maintain an immutable map pointer and atomically swap it on write using `atomic.Pointer[map[string]Item]`.",
+    "pitfalls": "Assuming `sync.RWMutex` is always faster than a regular `sync.Mutex` or `sync.Map`. On low-core or high-churn scenarios, RWMutex overhead can exceed a standard Mutex.",
+    "key_takeaway": "For read-mostly global state, prefer atomic pointer swaps (Copy-On-Write) or sharded mutexes over a single global RWMutex on high-core servers."
+  }
+]
