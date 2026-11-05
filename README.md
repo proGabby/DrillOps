@@ -98,6 +98,22 @@ git push -u origin main
 
 ---
 
+## 🤖 Interactive 2-Way AI Mentor (Telegram)
+
+You can chat live with your bot on Telegram for interactive coaching:
+
+```bash
+npm run bot
+```
+
+* **`/drill`**: View today's active challenge.
+* **`/hint`**: Ask the AI for a Socratic hint without spoiling the answer.
+* **`/solution`**: Reveal the complete architectural post-mortem early.
+* **Code Review & Feedback**: Reply with your proposed solution or code snippet, and the AI will evaluate edge cases, bottlenecks, and race conditions in real time!
+* **Freeform Q&A**: Ask any system design, Go, Node.js, Kubernetes, or SRE question anytime.
+
+---
+
 ## 🛠️ Local Development & Testing
 
 You can run and test the pipeline on your machine:
