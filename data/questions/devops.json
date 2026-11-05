@@ -43,5 +43,260 @@
     "answer": "1. **Root Cause:**\nDynamic or mutated fields in live cluster state that are not tracked in Git. The two most common culprits:\n- **HorizontalPodAutoscaler (HPA):** HPA mutates `spec.replicas` on the Deployment. Git specifies `replicas: 3`, but HPA scales it to `10`. ArgoCD sees `3 != 10` and attempts to revert it.\n- **Mutating Admission Webhooks:** Injected sidecars (Istio, Datadog), default service account tokens, or injected annotations.\n\n2. **Solution (ignoreDifferences):**\nIn the ArgoCD `Application` manifest or global `argocd-cm` configmap, add `ignoreDifferences`:\n\n```yaml\nspec:\n  ignoreDifferences:\n  - group: apps\n    kind: Deployment\n    jsonPointers:\n    - /spec/replicas\n```\nAnd in the Deployment manifest in Git, omit `spec.replicas` altogether so HPA owns scaling.",
     "pitfalls": "Setting `replicas: 1` in Git while running an HPA causes ArgoCD and HPA to fight continuously, creating pod thrashing in production.",
     "key_takeaway": "Never define static `replicas` in Git when using HPA, and use `ignoreDifferences` for admission-controller mutations."
+  },
+  {
+    "id": "devops-004",
+    "title": "Kubernetes PodDisruptionBudgets (PDB) & Safe Node Draining",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "An SRE triggers `kubectl drain node-12 --ignore-daemonsets` during a planned EKS node upgrade. The command blocks indefinitely, and production traffic suddenly experiences 500 error spikes because critical single-replica service pods were evicted simultaneously.",
+    "question": "How does a PodDisruptionBudget (PDB) protect voluntary disruptions vs involuntary disruptions, what manifest configuration prevents service downtime during cluster maintenance, and why did `kubectl drain` hang?",
+    "hints": [
+      "PDB specifies `minAvailable` or `maxUnavailable` for voluntary disruptions (like node drains).",
+      "If `minAvailable: 100%` or replicas are too low, eviction cannot be granted by the Eviction API."
+    ],
+    "answer": "1. **Voluntary vs Involuntary Disruptions:**\n- **Involuntary Disruptions:** Hardware failure, kernel panic, out of memory, or VM preemption. Kubernetes cannot guarantee availability here.\n- **Voluntary Disruptions:** Node drain for cluster upgrade, autoscaler scaling down a node, or manual eviction via `kubectl drain`. The Kubernetes Eviction API checks PDB rules before allowing pods to be terminated.\n\n2. **Why `kubectl drain` Hung:**\nIf a service has `replicas: 1` and a PDB with `minAvailable: 1` (or `maxUnavailable: 0`), evicting the single pod would drop available pods to 0. The API server rejects the eviction request. `kubectl drain` retries every few seconds indefinitely, blocking node maintenance.\n\n3. **Proper PDB Configuration:**\nDeploy at least 2 replicas across distinct nodes (using `podAntiAffinity`), and configure:\n```yaml\napiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: api-pdb\nspec:\n  maxUnavailable: 1\n  selector:\n    matchLabels:\n      app: api\n```\nThis allows node drain to evict exactly 1 pod at a time while the remaining pod serves live traffic.",
+    "pitfalls": "Configuring `minAvailable: 1` on a deployment with `replicas: 1`. You create an un-drainable node that blocks all automated cluster maintenance and security patching.",
+    "key_takeaway": "Always run at least 2 replicas with `podAntiAffinity` and a `maxUnavailable: 1` PDB to enable zero-downtime automated node patching."
+  },
+  {
+    "id": "devops-005",
+    "title": "Linux Cgroups v2 & CFS CPU Throttling: Requests vs Limits",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A high-performance microservice in Kubernetes has `resources.limits.cpu: \"1000m\"` (1 core). Even though CPU utilization averages only 35% on Grafana, P99 request latency randomly spikes from 5ms to 120ms. Checking `/sys/fs/cgroup/cpu.stat` reveals high `nr_throttled` counts.",
+    "question": "How does the Linux kernel Completely Fair Scheduler (CFS) quota period (`cpu.cfs_quota_us` and `cpu.cfs_period_us`) cause CPU throttling on multi-threaded runtimes despite low average CPU usage, and what is the modern SRE recommendation regarding CPU limits?",
+    "hints": [
+      "CFS evaluates CPU quotas in small 100ms periods (`100,000µs`).",
+      "A process running 10 threads can burn 1000ms of CPU time in just 10ms of real clock time."
+    ],
+    "answer": "1. **Mechanism of CFS Throttling:**\nKubernetes converts `limits.cpu: 1000m` into CFS bandwidth control: `cpu.cfs_period_us = 100000` (100ms) and `cpu.cfs_quota_us = 100000` (100ms of CPU time per 100ms window).\nIf a multi-threaded application (e.g. Go, Java, or Node with worker threads) receives a traffic burst and spins 10 threads on a 16-core node, all 10 threads run in parallel. In just **10 milliseconds** of real clock time, the 10 threads consume $10 \\times 10\\text{ms} = 100\\text{ms}$ of CPU quota.\nFor the remaining **90 milliseconds of the window**, the Linux kernel suspends the container's threads completely. Incoming network packets stall, resulting in catastrophic P99 latency spikes despite low average CPU over a 1-minute Prometheus window.\n\n2. **Modern Production Best Practices:**\n- **Remove CPU Limits on Latency-Sensitive Services:** Many top tech companies (Zalando, Buffer, Google) set generous CPU **requests** for scheduling guarantees, but omit CPU **limits** (or set them very high) to allow burstable CPU without CFS throttling.\n- **Use Kubernetes CPU Manager (`static` policy):** For extreme low latency, allocate exclusive CPU cores.",
+    "pitfalls": "Confusing average CPU utilization with peak burst usage. 1-minute metric averages hide millisecond-level CFS freeze periods.",
+    "key_takeaway": "CFS quotas enforce CPU limits in 100ms windows; multi-threaded processes easily burst their quota early and get throttled. Consider omitting CPU limits on latency-critical workloads."
+  },
+  {
+    "id": "devops-006",
+    "title": "Rootless Containers & User Namespaces (`userns`)",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A security audit reports that all application containers in your production cluster execute as UID 0 (root inside the container). An attacker who achieves a container breakout (e.g., via a kernel exploit or misconfigured volume mount `/var/run/docker.sock`) immediately gains root privileges over the host machine.",
+    "question": "What is the difference between running a non-root container (`USER 10001`) and running in a Rootless / User Namespace (`userns`) environment, and how do user namespaces map container UID 0 to an unprivileged host UID?",
+    "hints": [
+      "`USER 10001` drops root inside the container, but the container engine itself still runs as host root.",
+      "User namespaces map a range of container UIDs (e.g. 0-65535) to unprivileged host UIDs (e.g. 100000-165535)."
+    ],
+    "answer": "1. **Non-Root Container (`USER 10001`):**\nThe process inside the container runs as an unprivileged user (UID 10001). However, the container runtime daemon (Docker/containerd) is still running as host root. If an exploit grants container root, the attacker is root on the underlying Linux host.\n\n2. **Rootless Containers / User Namespaces (`userns`):**\nUser namespaces decouple the user IDs inside the container from the host system:\n- UID 0 (root) inside the container is mapped via `/etc/subuid` to an unprivileged UID (e.g. UID 100000) on the host.\n- If a malicious process breaks out of the container boundary onto the host filesystem, the kernel enforces UID 100000 permissions. The attacker has zero root capabilities on the host (cannot load kernel modules, cannot access raw disks, cannot tamper with other containers).\n\n3. **Dockerfile Best Practice:**\nAlways create a dedicated unprivileged user:\n```dockerfile\nRUN addgroup -S appgroup && adduser -S appuser -G appgroup\nUSER appuser\n```\nAnd in Kubernetes PodSecurityContext:\n```yaml\nsecurityContext:\n  runAsNonRoot: true\n  runAsUser: 10001\n```",
+    "pitfalls": "Assuming `chmod 777` or running as container root is harmless because containers are \"isolated VMs\". Containers share the host kernel; container root equals host root without user namespaces.",
+    "key_takeaway": "Always run containers as non-root (`runAsNonRoot: true`), and enable User Namespaces (`userns`) to eliminate host-level privilege escalation from container escapes."
+  },
+  {
+    "id": "devops-007",
+    "title": "Terraform State Locking with DynamoDB & State Drift Remediation",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate",
+    "scenario": "Two engineers concurrently trigger `terraform apply` on the same AWS infrastructure repo via CI and local terminal. Without state locking, both processes read state simultaneously, write conflicting resource IDs to the S3 bucket, and corrupt the remote state file. Later, an engineer manually edits a security group in the AWS Web Console.",
+    "question": "How does Terraform distributed state locking work using AWS S3 and DynamoDB, and what is the difference between `terraform refresh`, `terraform plan`, and `terraform import` when fixing out-of-band drift?",
+    "hints": [
+      "DynamoDB uses a `LockID` primary key to acquire an atomic distributed lock before state writes.",
+      "`terraform plan` compares code vs state, while `terraform refresh` synchronizes state with real cloud infrastructure."
+    ],
+    "answer": "1. **State Locking Mechanics (S3 + DynamoDB):**\nWhen configuring a remote backend:\n```hcl\nterraform {\n  backend \"s3\" {\n    bucket         = \"my-terraform-state\"\n    key            = \"prod/terraform.tfstate\"\n    region         = \"us-east-1\"\n    dynamodb_table = \"terraform-locks\"\n  }\n}\n```\nBefore executing `plan` or `apply`, Terraform writes an item to DynamoDB containing `LockID = \"<bucket>/<key>-md5\"` using conditional writes (`attribute_not_exists(LockID)`). Any concurrent run attempting to acquire the lock fails immediately with `Error: Error acquiring the state lock`.\n\n2. **Drift Remediation:**\n- **Manual Console Changes (Drift):** Running `terraform plan` queries the live cloud provider APIs, detects that the security group was modified, updates the state file, and proposes a plan to revert the resource back to the declared HCL configuration.\n- **`terraform apply -refresh-only`:** Updates the state file to match reality without changing cloud resources.\n- **`terraform import`:** Adopts existing unmanaged cloud resources into Terraform state so code can manage them.",
+    "pitfalls": "Force-unlocking a state (`terraform force-unlock <LOCK_ID>`) without verifying whether a teammate or CI runner is actively applying changes. Doing so risks state file corruption.",
+    "key_takeaway": "Always enforce remote state locking with DynamoDB, and use `terraform plan` to automatically detect and remediate out-of-band console drift."
+  },
+  {
+    "id": "devops-008",
+    "title": "Kubernetes NetworkPolicies: Default Deny & CNI Architecture",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A payment processing pod in Kubernetes is compromised via an RCE vulnerability in an npm dependency. The attacker immediately runs port scans across the entire internal cluster CIDR (`10.244.0.0/16`), successfully connecting to internal Redis caches and staging databases that lacked authentication.",
+    "question": "Why does Kubernetes allow unrestricted all-to-all pod networking by default, how do you construct a \"Default Deny All\" NetworkPolicy, and why do standard cloud VPC CNIs (like basic AWS VPC CNI) fail to enforce NetworkPolicies without add-ons?",
+    "hints": [
+      "Kubernetes networking specification enforces that all pods can communicate with all pods without NAT.",
+      "NetworkPolicies require a CNI plugin that implements policy enforcement (e.g. Calico, Cilium)."
+    ],
+    "answer": "1. **Kubernetes Default Networking Philosophy:**\nBy default, Kubernetes implements an open network model: **any pod in any namespace can send packets to any other pod in any namespace** without restriction.\n\n2. **Default Deny All Ingress & Egress Policy:**\nApply this manifest to isolate a namespace completely:\n```yaml\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: default-deny-all\n  namespace: production\nspec:\n  podSelector: {}\n  policyTypes:\n  - Ingress\n  - Egress\n```\nOnce applied, all traffic into and out of every pod is blocked until explicit `ingress` and `egress` whitelist rules (e.g. allowing egress only to CoreDNS on port 53 and AWS RDS on 5432) are defined.\n\n3. **CNI Enforcement Requirement:**\nNetworkPolicy resources are purely declarative specs in the API server. If the cluster uses a basic CNI (like standard AWS VPC CNI or basic Flannel), the CNI simply allocates IP addresses and ignores NetworkPolicies entirely. Enforcement requires an engine like **Calico** (iptables/eBPF) or **Cilium** (eBPF).",
+    "pitfalls": "Creating NetworkPolicy resources without verifying if your cluster's CNI provider actually supports NetworkPolicy enforcement. You will think you are secure when all traffic is flowing freely.",
+    "key_takeaway": "Kubernetes is open by default. Apply a Default Deny NetworkPolicy in every namespace and verify your CNI (Cilium/Calico) enforces it."
+  },
+  {
+    "id": "devops-009",
+    "title": "Container Base Images: Alpine (musl) vs Distroless (glibc) Gotchas",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A team migrates their production Node.js and Go microservices from `node:20-slim` (Debian) to `node:20-alpine` to reduce container size. Immediately, DNS lookups under heavy concurrency become erratic and slow, and a C++ native dependency (`sharp` image processing) crashes at startup with `Error: Error relocating /app/node_modules/...: __isnan: symbol not found`.",
+    "question": "What is the difference between GNU C Library (`glibc`) and `musl libc`, why do native addons fail on Alpine, and why are Google Distroless or Debian Slim images preferred for enterprise production?",
+    "hints": [
+      "Alpine Linux uses `musl libc`, whereas Debian/Ubuntu/RHEL use `glibc`.",
+      "Pre-compiled native binaries (npm/pip packages) are almost always compiled against `glibc`."
+    ],
+    "answer": "1. **glibc vs musl libc:**\n- **Debian / Ubuntu / Distroless:** Use GNU C Library (`glibc`). Vast majority of pre-built binary wheels (Python, Node native addons, Go cgo) are compiled against `glibc`.\n- **Alpine:** Uses `musl libc` to achieve tiny 5MB base image footprints. However, `musl` has different memory allocator implementations and subtle POSIX differences.\n- **DNS Behavior:** `musl` does not support `search` domains in `/etc/resolv.conf` the same way `glibc` does and sends concurrent A and AAAA DNS lookups over single UDP sockets, triggering drops with certain DNS servers.\n\n2. **Why Native Addons Fail:**\nPre-built binaries looking for standard `glibc` dynamic linker symbols fail to link dynamically against `musl`, forcing build tools to fall back to slow source compilation (which fails if compilers are missing from Alpine).\n\n3. **Production Best Practice: Google Distroless:**\nUse `gcr.io/distroless/static` (for static Go/Rust) or `gcr.io/distroless/nodejs20-debian12`:\n- Contains only your application and direct runtime dependencies.\n- Eliminates package managers (`apk`, `apt`), shells (`/bin/sh`, `/bin/bash`), and common utilities, shrinking the CVE attack surface while preserving `glibc` compatibility.",
+    "pitfalls": "Blindly choosing Alpine for every Dockerfile without testing DNS latency and C-extension compatibility under production loads.",
+    "key_takeaway": "Use Google Distroless or Debian Slim for glibc compatibility and security; avoid Alpine if your runtime uses native C-bindings or relies on complex DNS resolution."
+  },
+  {
+    "id": "devops-010",
+    "title": "Kube-Proxy Modes: iptables vs IPVS vs eBPF (Cilium) at Scale",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A Kubernetes cluster grows to 10,000 Services and 50,000 Pods. Nodes start experiencing severe kernel CPU spikes, and adding or removing a single Service takes 25 seconds to propagate. `dmesg` shows `nf_conntrack: table full, dropping packet`.",
+    "question": "How does `kube-proxy` in `iptables` mode handle packet routing, why does its sequential evaluation degrade at $O(N)$ scale, and how do IPVS (IP Virtual Server) and eBPF (Cilium) provide $O(1)$ routing performance?",
+    "hints": [
+      "iptables rules are evaluated sequentially from top to bottom.",
+      "IPVS uses in-kernel hash tables, and eBPF attaches programs directly to socket layers (XDP/tc)."
+    ],
+    "answer": "1. **iptables Mode Limitations ($O(N)$ Complexity):**\n`kube-proxy` in default iptables mode generates chains of iptables rules for every Service and Endpoints slice. For 10,000 services, iptables tables swell to over 40,000 rules. When a packet arrives, the Linux netfilter engine must evaluate rules **sequentially from top to bottom**. Furthermore, whenever any pod restarts, kube-proxy must re-sync the entire iptables chain atomically, consuming high kernel CPU.\n\n2. **IPVS Mode ($O(1)$ Complexity):**\nIPVS runs inside the Linux kernel transport layer using **hash tables** instead of linear rule lists. Lookup complexity drops to $O(1)$ regardless of cluster size. Service sync times remain negligible even with 100,000 endpoints.\n\n3. **Cilium eBPF (Bypassing Kube-Proxy & Conntrack):**\nCilium replaces kube-proxy entirely using eBPF programs loaded directly into the network data path (XDP / tc):\n- Translates Service ClusterIP to Pod IP directly at the socket layer (`sock_ops`), bypassing the heavy Linux conntrack table.\n- Packets travel directly between pod veth pairs or hardware NICs with virtually zero netfilter overhead.",
+    "pitfalls": "Staying on default `kube-proxy` iptables mode when scaling past 2,000 services. Cluster routing latency increases silently.",
+    "key_takeaway": "Switch from iptables to IPVS or eBPF (Cilium) to achieve $O(1)$ service routing and prevent conntrack table exhaustion as Kubernetes clusters scale."
+  },
+  {
+    "id": "devops-011",
+    "title": "Zero-Downtime TLS: Cert-Manager, ACME Rate Limits & DNS-01 Challenges",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A production cluster uses `cert-manager` with Let's Encrypt `HTTP-01` challenge. During a staging deployment with 50 ephemeral review environments, developers trigger automated ingress creation in a loop. Let's Encrypt hits its weekly rate limit (50 certificates per registered domain), blocking production TLS renewal and threatening an imminent site-wide certificate outage.",
+    "question": "What is the difference between ACME `HTTP-01` and `DNS-01` validation challenges, how do you handle Let's Encrypt rate limits, and what configuration ensures `cert-manager` renews certificates without downtime?",
+    "hints": [
+      "HTTP-01 requires public HTTP access to `/.well-known/acme-challenge/` on port 80.",
+      "DNS-01 proves domain ownership by creating a TXT record in your DNS provider (e.g. Route53, Cloudflare)."
+    ],
+    "answer": "1. **HTTP-01 vs DNS-01 Challenges:**\n- **HTTP-01:** Let's Encrypt server queries `http://<your-domain>/.well-known/acme-challenge/<token>`. *Pros:* Simple. *Cons:* Cannot issue wildcard certificates (`*.example.com`); requires ingress routing open to the public internet on port 80.\n- **DNS-01:** `cert-manager` uses IAM credentials to create a `_acme-challenge.<domain>` TXT record in DNS (AWS Route 53, Cloudflare). *Pros:* Supports wildcard certificates; works for internal private clusters with zero public ingress ports open.\n\n2. **Handling Rate Limits:**\n- **Use Let's Encrypt Staging Environment:** In staging/CI environments, point your `ClusterIssuer` to `https://acme-staging-v02.api.letsencrypt.org/directory`. Staging has much higher rate limits.\n- **Wildcard Certificates:** Instead of issuing 50 individual certificates for subdomains, issue one wildcard certificate (`*.staging.example.com`).\n\n3. **Renewal Safety:**\n`cert-manager` automatically initiates renewal 30 days before expiration (`renewBefore: 720h`). If renewal stutters, alerts must fire when a certificate has <15 days remaining.",
+    "pitfalls": "Using production Let's Encrypt issuers in automated CI/CD pipelines. You will quickly exhaust the 50 certs/week domain rate limit and lock out production renewals.",
+    "key_takeaway": "Use DNS-01 challenges with wildcard certificates for internal and staging environments, and point CI/staging pipelines to Let's Encrypt Staging."
+  },
+  {
+    "id": "devops-012",
+    "title": "Kubernetes QoS Classes: Guaranteed vs Burstable vs BestEffort Evictions",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Kubernetes worker node runs low on physical memory (`MemoryPressure`). The kubelet starts evicting pods to prevent the node kernel from crashing. Kubelet abruptly terminates your production payment service pod while leaving a background batch data scraper pod running on the same node.",
+    "question": "How does Kubernetes assign Quality of Service (QoS) classes (`Guaranteed`, `Burstable`, `BestEffort`), how does kubelet determine the eviction order under node pressure, and how do you guarantee production pods are spared?",
+    "hints": [
+      "QoS is determined automatically based on the relationship between `requests` and `limits`.",
+      "Kubelet sets the Linux kernel `oom_score_adj` based on QoS."
+    ],
+    "answer": "1. **The Three QoS Classes:**\n- **Guaranteed:** Every container in the pod has `requests.cpu == limits.cpu` AND `requests.memory == limits.memory`. `oom_score_adj` is set to `-997` (virtually immune to eviction).\n- **Burstable:** At least one container has memory or CPU request defined, but `requests != limits`. `oom_score_adj` is proportional to the percentage of requested memory currently consumed.\n- **BestEffort:** Containers have **zero** requests and **zero** limits set. `oom_score_adj` is set to `1000` (first in line to be killed).\n\n2. **Eviction Order Under Resource Pressure:**\nWhen a node hits memory or disk thresholds, kubelet evicts in this exact order:\n1. **BestEffort pods** are terminated first.\n2. **Burstable pods** that exceed their memory requests are terminated next.\n3. **Guaranteed pods** are evicted last, and only if all lower-priority pods have already been cleared and node pressure persists.\n\n3. **Root Cause of the Incident:**\nThe payment service had `limits` set higher than `requests` (Burstable) and was consuming 150% of its request, while the scraper had equal requests and limits (Guaranteed). Kubelet evicted the payment pod first.",
+    "pitfalls": "Setting memory limits significantly higher than requests on critical production pods. If the node runs low on RAM, burstable pods exceeding their requests are evicted first.",
+    "key_takeaway": "Set `requests == limits` for memory on critical production pods to assign them the `Guaranteed` QoS class and protect them from node evictions."
+  },
+  {
+    "id": "devops-013",
+    "title": "Kubernetes Service Types & ExternalName CNAME Injection Risks",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A developer configures an `ExternalName` service in Kubernetes to alias an external database: `spec.externalName: prod-db.internal.net`. A security researcher submits a bug bounty showing that any tenant who can create services in a shared namespace can hijack cluster DNS traffic or perform Man-in-the-Middle (MitM) attacks.",
+    "question": "Compare ClusterIP, NodePort, LoadBalancer, and ExternalName services. What DNS record does `ExternalName` produce in CoreDNS, and what security risk led Kubernetes to restrict ExternalName handling in newer versions?",
+    "hints": [
+      "ClusterIP allocates a virtual IP; ExternalName returns a CNAME record.",
+      "Check CVE-2021-25740 regarding ExternalName and ingress path hijacking."
+    ],
+    "answer": "1. **Service Types Comparison:**\n- **ClusterIP (Default):** Allocates an internal virtual IP reachable only within the cluster. Handled by kube-proxy.\n- **NodePort:** Allocates a dedicated port (range 30000-32767) on every node IP in the cluster. Routes external traffic to ClusterIP.\n- **LoadBalancer:** Provisions a cloud provider load balancer (AWS NLB/ALB, GCP LB) that forwards traffic to NodePort/ClusterIP.\n- **ExternalName:** Does not allocate a virtual IP or proxy traffic. Instead, CoreDNS returns a **CNAME DNS record** pointing to an external domain name.\n\n2. **The Security Risk (ExternalName Hijacking):**\nBecause CoreDNS returns a CNAME, a malicious user in a multi-tenant cluster can create an `ExternalName` service matching the name of an internal service (or cloud metadata endpoint `169.254.169.254`), tricking other pods into routing confidential requests to an attacker-controlled external host.\nIn Ingress controllers (like ingress-nginx), `ExternalName` could be leveraged to bypass path-based routing rules and exfiltrate credentials.\n\n3. **Remediation:** Disable ExternalName services in multi-tenant environments using admission controllers (OPA Gatekeeper or Kyverno).",
+    "pitfalls": "Using `ExternalName` services without strict RBAC. In shared or multi-tenant clusters, unprivileged users can redirect cluster DNS lookups.",
+    "key_takeaway": "Use ClusterIP for internal services and ingress controllers for edge routing; restrict `ExternalName` services in multi-tenant clusters to prevent DNS CNAME redirection attacks."
+  },
+  {
+    "id": "devops-014",
+    "title": "GitOps Secrets: SealedSecrets vs SOPS vs External Secrets Operator",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A team embraces GitOps with ArgoCD. Everything is committed to a public or shared GitHub repository. An engineer base64-encodes a database password and commits a Kubernetes `Secret` manifest (`password: c3VwZXJzZWNyZXQ=`), believing base64 provides encryption.",
+    "question": "Why is base64 not encryption, and what are the architectural differences between Bitnami SealedSecrets, Mozilla SOPS, and External Secrets Operator (ESO) for GitOps workflows?",
+    "hints": [
+      "Base64 is an encoding format, not encryption. Anyone can decode it with `echo ... | base64 -d`.",
+      "External Secrets Operator synchronizes secrets from cloud vaults (AWS Secrets Manager, HashiCorp Vault) directly into Kubernetes."
+    ],
+    "answer": "1. **Base64 vs Encryption:**\nKubernetes `data` fields in `Secret` manifests are standard base64 strings. Base64 is a bidirectional serialization format with zero cryptographic keys. Committing it to Git is equivalent to committing plaintext passwords.\n\n2. **Architectural Comparison of GitOps Secret Tools:**\n- **Bitnami SealedSecrets:**\n  - *Mechanism:* Uses asymmetric cryptography. A controller in the cluster holds the private key; developers use the public key (`kubeseal`) to encrypt secrets into a `SealedSecret` custom resource.\n  - *Pros:* Fully GitOps native; safe to commit `SealedSecret` to public Git.\n  - *Cons:* Tied specifically to one cluster (if private key is lost during cluster rebuild, secrets cannot be decrypted).\n- **Mozilla SOPS:**\n  - *Mechanism:* Encrypts YAML values using AWS KMS, GCP KMS, or PGP keys. The encrypted YAML file is committed to Git and decrypted during CI or ArgoCD hydration plugins.\n  - *Pros:* Cloud KMS-backed; cluster-independent.\n- **External Secrets Operator (ESO - Modern Standard):**\n  - *Mechanism:* Git contains **zero** encrypted values. Git contains only reference pointers (`ExternalSecret` CRD pointing to AWS Secrets Manager, HashiCorp Vault, or Azure Key Vault). The ESO controller synchronizes the secret into a native Kubernetes Secret at runtime.\n  - *Pros:* Centralized enterprise secret lifecycle, automated secret rotation without git commits.",
+    "pitfalls": "Never store encrypted secrets in Git if your company already uses a centralized vault (AWS Secrets Manager / Vault). Use External Secrets Operator to keep Git completely secret-free.",
+    "key_takeaway": "Never commit base64 Kubernetes Secrets to Git. Use External Secrets Operator (ESO) to sync secrets directly from cloud vaults like AWS Secrets Manager into Kubernetes."
+  },
+  {
+    "id": "devops-015",
+    "title": "Event-Driven Autoscaling with KEDA vs Standard Kubernetes HPA",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A background worker consumes messages from an Apache Kafka topic or AWS SQS queue. The team configures standard Kubernetes HorizontalPodAutoscaler (HPA) targeting `cpuUtilizationPercentage: 70%`. During an off-peak surge, 100,000 I/O-bound messages land in the queue. Because workers spend their time waiting on external network calls, CPU usage remains at 15%, and HPA fails to scale the worker pods.",
+    "question": "Why does CPU/Memory-based autoscaling fail for queue workers, how does KEDA (Kubernetes Event-driven Autoscaling) scale based on event metrics, and how does KEDA achieve scale-to-zero?",
+    "hints": [
+      "Standard HPA queries `metrics-server` (CPU/RAM). Workers waiting on I/O don't consume CPU.",
+      "KEDA exposes an external metrics adapter to HPA and scales pods directly from 0 to 1."
+    ],
+    "answer": "1. **The Flaw with Resource-Based Scaling:**\nWorker queues are I/O bound. When 100,000 tasks arrive, pods spend most of their time awaiting network replies (DB queries, HTTP APIs). Average CPU utilization stays low. Standard HPA sees CPU < 70% and refuses to scale, allowing queue lag to mount to hours.\n\n2. **KEDA Architecture:**\nKEDA implements a custom External Metrics Server for Kubernetes:\n- Configured via a `ScaledObject` that targets the event source (e.g. Kafka consumer lag, AWS SQS queue depth, RabbitMQ queue length):\n```yaml\napiVersion: keda.sh/v1alpha1\nkind: ScaledObject\nmetadata:\n  name: kafka-worker-scaler\nspec:\n  scaleTargetRef:\n    name: worker-deployment\n  minReplicaCount: 0\n  maxReplicaCount: 50\n  triggers:\n  - type: aws-sqs\n    metadata:\n      queueURL: https://sqs.us-east-1.amazonaws.com/123/tasks\n      queueLength: '100'\n```\n- If queue length is 1,000, KEDA signals HPA to scale to 10 pods ($1000 / 100$).\n\n3. **Scale-to-Zero:**\nStandard HPA cannot scale a deployment from 0 to 1 (it requires at least 1 running pod to measure metrics). KEDA acts as an activator: when queue depth is 0, KEDA scales the deployment to 0. When a message lands in the queue, KEDA immediately scales the deployment to 1, after which HPA manages scaling up to `maxReplicaCount`.",
+    "pitfalls": "Using standard CPU HPA for queue processors. When queue consumers get stuck or lag, CPU usage often drops, leading HPA to scale down right when it needs to scale up.",
+    "key_takeaway": "Scale queue workers on consumer lag/queue length using KEDA, not on CPU utilization, and take advantage of KEDA's scale-to-zero capabilities."
+  },
+  {
+    "id": "devops-016",
+    "title": "Kubernetes Init Containers vs Native Sidecar Containers (K8s 1.28+)",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Kubernetes Job runs a database schema migration. To establish a secure mTLS connection to the database, an Istio / Cloud SQL Proxy sidecar container is injected into the Pod. The migration script finishes successfully in 5 seconds and exits with status 0. However, the Kubernetes Job remains in `Running` status for hours and never marks as completed because the proxy sidecar keeps running indefinitely.",
+    "question": "Why did sidecars historically break Kubernetes Jobs and Pod shutdown sequences, and how do native restartable sidecars in Kubernetes 1.28+ (`restartPolicy: Always` in `initContainers`) resolve this lifecycle flaw?",
+    "hints": [
+      "Historically, all containers in `spec.containers` are started in parallel and run until the pod terminates.",
+      "Kubernetes 1.28 introduced native sidecars inside `spec.initContainers`."
+    ],
+    "answer": "1. **The Historical Sidecar Problem:**\nBefore Kubernetes 1.28, there was no native concept of a \"sidecar\". Sidecars (like Cloud SQL Proxy, Envoy, Fluentbit) were placed in `spec.containers` alongside the main app:\n- **Startup Race:** Kubernetes starts all containers in parallel. If the main app boots before the proxy sidecar is ready, the app fails to connect to the DB and crashes.\n- **Job Completion Failure:** A Kubernetes Job only completes when **all** containers exit. Because proxy sidecars run infinite loops, the Job never terminates.\n\n2. **The Modern Solution (K8s 1.28+ Native Sidecars):**\nKubernetes 1.28 (GA in 1.29) introduced native sidecars by allowing `restartPolicy: Always` inside `spec.initContainers`:\n```yaml\nspec:\n  initContainers:\n  - name: vault-agent-proxy\n    image: vault:1.15\n    restartPolicy: Always\n```\n- **Ordered Startup:** Kubelet starts the init sidecar first and waits for its startup probe to succeed *before* starting subsequent containers.\n- **Clean Termination:** When all regular containers in `spec.containers` exit (e.g. the Job finishes), kubelet automatically sends SIGTERM to the native init sidecars, allowing the Job to complete cleanly.",
+    "pitfalls": "Writing hacky bash scripts that curl `http://127.0.0.1:15020/quitquitquit` to kill Envoy sidecars upon job completion. Upgrade to native K8s sidecars instead.",
+    "key_takeaway": "Use native Kubernetes sidecars (`restartPolicy: Always` in `initContainers`) to guarantee startup sequencing and automated shutdown in batch Jobs."
+  },
+  {
+    "id": "devops-017",
+    "title": "Container Hardening: Linux Capabilities, Read-Only RootFS & Seccomp",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A container running an open-source web application is compromised through an arbitrary file upload vulnerability. The attacker downloads an exploit binary into `/tmp`, makes it executable (`chmod +x`), and modifies system files. In your security post-mortem, you are tasked with locking down container permissions so that even with remote code execution, binary execution and filesystem tampering are impossible.",
+    "question": "What three container hardening settings in `securityContext` (`readOnlyRootFilesystem`, `capabilities.drop`, `seccompProfile`) neutralize this attack vector, and how do you handle applications that genuinely need to write temporary files?",
+    "hints": [
+      "Drop all default Linux kernel capabilities and add back only what is strictly required.",
+      "Mount an `emptyDir` memory volume on `/tmp` with `noexec`."
+    ],
+    "answer": "1. **The Hardened Security Context:**\nEnforce this manifest across all deployments:\n```yaml\nspec:\n  securityContext:\n    runAsNonRoot: true\n    runAsUser: 10001\n    seccompProfile:\n      type: RuntimeDefault\n  containers:\n  - name: app\n    securityContext:\n      allowPrivilegeEscalation: false\n      readOnlyRootFilesystem: true\n      capabilities:\n        drop:\n        - ALL\n```\n\n2. **Mechanism Breakdown:**\n- **`readOnlyRootFilesystem: true`:** The entire container filesystem is mounted read-only. An attacker cannot write files, overwrite binaries, or drop malicious scripts.\n- **`capabilities.drop: [\"ALL\"]`:** Drops all 38+ default Linux capabilities (e.g. `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SYS_ADMIN`), restricting the process from modifying network routes or mounting devices.\n- **`seccompProfile: RuntimeDefault`:** Restricts dangerous system calls to the Linux kernel via seccomp filters.\n\n3. **Handling Necessary Temporary Writes:**\nIf the application requires `/tmp` for caching or processing uploads, mount an ephemeral in-memory `emptyDir` volume specifically to `/tmp`:\n```yaml\nvolumeMounts:\n- name: tmp-dir\n  mountPath: /tmp\nvolumes:\n- name: tmp-dir\n  emptyDir:\n    medium: Memory\n```",
+    "pitfalls": "Leaving `allowPrivilegeEscalation: true`. This allows child processes to gain more privileges than their parent via setuid binaries.",
+    "key_takeaway": "Enforce `readOnlyRootFilesystem: true`, drop `ALL` capabilities, and mount ephemeral `emptyDir` volumes on `/tmp` for defense-in-depth container security."
+  },
+  {
+    "id": "devops-018",
+    "title": "Kubernetes Gateway API vs Ingress NGINX: HTTPRoute & Role Separation",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "In a multi-team engineering organization, both the Core Infrastructure team and 10 individual product development teams edit the exact same monolithic `ingress-nginx` YAML file. A typo in an ingress annotation introduced by the Checkout team breaks TLS certificates and routing for the entire company.",
+    "question": "What are the structural architectural limitations of the legacy Kubernetes Ingress API, and how does the new Gateway API (`GatewayClass`, `Gateway`, `HTTPRoute`) provide role-oriented multi-tenant routing separation?",
+    "hints": [
+      "The legacy Ingress API combined infrastructure definition and application routing into a single resource.",
+      "Gateway API splits concerns between Infrastructure Providers, Cluster Operators, and Application Developers."
+    ],
+    "answer": "1. **Limitations of Legacy Ingress:**\n- **Single Resource Monolith:** Ingress forced infrastructure configuration (TLS certs, load balancer IP) and application routing (paths, backends) into one object.\n- **Vendor Lock-in via Annotations:** Advanced features (header rewrites, rate limits, canary routing) were not in the spec and required custom vendor annotations (`nginx.ingress.kubernetes.io/rewrite-target`), making ingress manifests non-portable.\n\n2. **Gateway API Role-Oriented Architecture:**\n- **`GatewayClass` (Infra Provider - AWS/Envoy):** Defines the underlying load balancing controller.\n- **`Gateway` (Cluster Platform Admin):** Declares where and how the cluster listens for external traffic (ports, IP address, TLS termination certificates). Owned strictly by SRE/Platform teams.\n- **`HTTPRoute` (Application Developer):** Declares routing rules, header matching, and backend services (`/checkout` -> `checkout-service`). Owned by product teams:\n```yaml\napiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: checkout-routes\n  namespace: checkout\nspec:\n  parentRefs:\n  - name: internal-gateway\n    namespace: platform-infra\n  rules:\n  - matches:\n    - path:\n        type: PathPrefix\n        value: /checkout\n    backendRefs:\n    - name: checkout-svc\n      port: 8080\n```\nDevelopers can freely update their routing rules without touching the underlying TLS gateway, isolating the blast radius.",
+    "pitfalls": "Staying on legacy Ingress API and relying on bloated custom annotation strings that fail silently when migrating between cloud providers.",
+    "key_takeaway": "Adopt the Kubernetes Gateway API to separate platform infrastructure (`Gateway`) from application team routing (`HTTPRoute`), eliminating cross-team blast radiuses."
+  },
+  {
+    "id": "devops-019",
+    "title": "Multi-Architecture Docker Builds: Native Runners vs QEMU Emulation",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate",
+    "scenario": "A development team develops on Apple Silicon M-series Macs (`linux/arm64`), while the production Kubernetes cluster runs AWS Graviton (`linux/arm64`) alongside legacy Intel nodes (`linux/amd64`). In your CI pipeline, `docker buildx build --platform linux/amd64,linux/arm64` takes 28 minutes to build and test.",
+    "question": "Why is cross-compilation via QEMU emulation so drastically slow in CI, and what are the two distinct approaches to build multi-arch images in under 2 minutes?",
+    "hints": [
+      "QEMU emulates CPU instructions in software, incurring 5x-10x performance penalties.",
+      "Go and Rust support native cross-compilation without QEMU; alternatively, use native multi-arch GitHub runners."
+    ],
+    "answer": "1. **Why QEMU Emulation is Slow:**\nWhen an x86 CI runner builds an ARM64 image using `docker buildx` with QEMU, every CPU instruction executed during `RUN` steps (compilers, package installs, test runners) is translated dynamically in software. This emulation tax causes builds to take 5x to 10x longer.\n\n2. **Optimization Strategy 1: Native Cross-Compilation (Go / Rust):**\nLanguages like Go do not require CPU emulation to generate foreign binaries. Compile on the runner's native architecture targeting the target OS/ARCH:\n```dockerfile\n# Use native runner platform for compilation stage\nFROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder\nARG TARGETOS\nARG TARGETARCH\nWORKDIR /app\nCOPY . .\n# Cross-compile natively at full CPU speed!\nRUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o server ./cmd/server\n\nFROM alpine:3.20\nCOPY --from=builder /app/server /server\nENTRYPOINT [\"/server\"]\n```\n\n3. **Optimization Strategy 2: Multi-Runner Manifest Lists:**\nBuild `linux/amd64` on an x86 runner and `linux/arm64` on an ARM runner natively in parallel in CI, then merge the images into a multi-arch manifest list using:\n```bash\ndocker manifest create myimage:latest myimage:amd64 myimage:arm64\ndocker manifest push myimage:latest\n```",
+    "pitfalls": "Running full unit tests and complex package compilations inside QEMU emulation layers in CI. It wastes compute and slows feedback loops.",
+    "key_takeaway": "Avoid QEMU emulation by leveraging native language cross-compilation (`GOARCH`), or build on native ARM/x86 runners and merge with `docker manifest create`."
+  },
+  {
+    "id": "devops-020",
+    "title": "Ephemeral Debug Containers & Troubleshooting Distroless Pods",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A production pod running a Google Distroless image (`gcr.io/distroless/static`) fails with connection reset errors when contacting an external microservice. An engineer attempts to debug by running `kubectl exec -it <pod> -- sh`, but the command fails immediately with: `rpc error: code = Internal desc = exec failed: container_linux.go: exec: \"sh\": executable file not found in $PATH`.",
+    "question": "How do you troubleshoot and inspect networking, filesystem, and processes on a running distroless or scratch container in production without installing debugging tools into the production image?",
+    "hints": [
+      "Check `kubectl debug` with ephemeral containers.",
+      "The debug container can share process namespaces (`--target`) with the target container."
+    ],
+    "answer": "1. **The Distroless Conundrum:**\nDistroless and minimal container images contain only the application binary and runtime libraries. They intentionally lack `/bin/sh`, `/bin/bash`, `curl`, `netstat`, or package managers to minimize CVEs and image size. Therefore, traditional `kubectl exec` is impossible.\n\n2. **The Modern Fix: `kubectl debug` Ephemeral Containers:**\nKubernetes 1.25+ natively supports injecting an **Ephemeral Container** into an existing, live pod without restarting it:\n```bash\nkubectl debug -it pod/payment-svc-78f9 --image=nicolaka/netshoot --target=payment-container\n```\n\n3. **How It Works Under the Hood:**\n- **Pre-packaged Tooling:** The ephemeral container boots an image packed with diagnostic utilities (e.g. `nicolaka/netshoot` containing `curl`, `tcpdump`, `dig`, `ss`, `strace`).\n- **Shared Namespaces (`--target`):** By attaching to the target container, the debug container joins the exact same Linux **Network Namespace** and **Process Namespace** (PID sharing).\n- An engineer can run `tcpdump -i any port 8080`, inspect `ss -tlpn`, or attach `strace -p 1` to the production binary in real time without ever modifying the base Docker image.",
+    "pitfalls": "Leaving debugging utilities (curl, ping, bash, compiler tools) in production base images. It expands container attack surface and increases security vulnerability alerts.",
+    "key_takeaway": "Ship production images with Distroless/Scratch, and use `kubectl debug` with ephemeral diagnostic containers (`netshoot`) to troubleshoot live pods."
   }
 ]
