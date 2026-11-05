@@ -1,0 +1,47 @@
+[
+  {
+    "id": "sre-001",
+    "title": "Multi-Window Multi-Burn-Rate Alerts vs Static Thresholds",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "Your team maintains a critical payment processing service with a 99.9% 30-day availability SLO (Error Budget = 0.1% or ~43.2 minutes of total downtime per month). The current Prometheus alert fires whenever `error_rate > 1%` over a 5-minute window. On-call engineers are constantly paged at 3:00 AM for 2-minute blips that self-heal, but a slow 0.5% failure rate burning through 100% of the monthly error budget went completely unnoticed for two weeks.",
+    "question": "What is an Error Budget Burn Rate, why do static threshold alerts fail to protect SLOs, and how does Google's Multi-Window Multi-Burn-Rate alerting model eliminate false positives while catching both acute outages and slow leaks?",
+    "hints": [
+      "A Burn Rate of 1 means you burn 100% of your 30-day budget in exactly 30 days.",
+      "A burn rate of 14.4 consumes 2% of your monthly budget in 1 hour."
+    ],
+    "answer": "1. **Burn Rate Definition:**\nBurn rate is the rate at which a service consumes its error budget. For a 99.9% SLO:\n- Burn rate 1: Consumes 100% budget over 30 days (error rate = 0.1%).\n- Burn rate 14.4: Consumes 2% budget in 1 hour (error rate = 1.44%).\n- Burn rate 6: Consumes 5% budget in 6 hours (error rate = 0.6%).\n\n2. **Failure of Static Thresholds:**\n- High threshold (e.g. >1% for 5 min): Alerts on transient network blips that consume <0.01% of the budget (page fatigue).\n- Low threshold (e.g. >0.1% for 5 min): Alerts constantly on natural noise.\n- Missing slow burns: A 0.5% error rate does not trigger a >1% alert, but burns 5x the budget and destroys the monthly SLO in 6 days.\n\n3. **Multi-Window Multi-Burn-Rate Solution:**\nRequire **two conditions** across both a short window (to verify the outage is still happening right now) and a long window (to verify meaningful budget consumption):\n- **Page (Critical):** Burn Rate 14.4 over 1h (long window) AND 5m (short window). Consumes 2% of budget; pages if active.\n- **Ticket (Non-paging):** Burn Rate 1 over 3-day window AND 6-hour window. Flags slow burns during business hours without waking on-call at night.",
+    "pitfalls": "Alerting on single metrics or short windows without checking whether the issue is sustained. This destroys on-call morale.",
+    "key_takeaway": "Alert on Error Budget Burn Rates using paired short and long windows, not arbitrary static CPU or 5-minute error percentages."
+  },
+  {
+    "id": "sre-002",
+    "title": "Thundering Herd / Cache Stampede Post-Database Restart",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A high-traffic e-commerce service caches hot product catalog items in Redis with a 1-hour TTL. Redis undergoes a planned maintenance reboot. Immediately upon Redis coming back online with an empty cache, 10,000 concurrent user requests hit the backend, overwhelming the primary PostgreSQL database and causing CPU saturation to 100% and cascading 504 Gateway Timeouts across the entire platform.",
+    "question": "What is the technical name for this cascading failure, and what are the two distinct architectural patterns (one on the application layer, one on caching expiration) used to neutralize it?",
+    "hints": [
+      "Consider `singleflight` (Go) or promise sharing (Node.js).",
+      "Look into probabilistic early expiration (XFetch algorithm) or staggered TTL jitter."
+    ],
+    "answer": "1. **Phenomenon:**\n**Cache Stampede** (also known as the **Thundering Herd** problem). When a hot cache key expires or is flushed, all concurrent incoming requests miss the cache simultaneously and all execute expensive identical database queries at the same instant.\n\n2. **Application-Layer Solution (Singleflight / Request Coalescing):**\nWhen multiple concurrent goroutines/promises request the same cache key:\n- In Go: Use `golang.org/x/sync/singleflight`. Only one worker executes the database call; all other waiting callers block and receive a duplicate of the single returned result.\n- In Node.js: Cache the in-flight `Promise` in memory so concurrent calls await the exact same promise.\n\n3. **Caching Strategy (Probabilistic Early Expiration / Jitter):**\n- **TTL Jitter:** Never set static expiration (e.g., `TTL = 3600`). Always randomize (`TTL = 3600 + rand(-300, 300)`) to prevent synchronized expiration waves.\n- **XFetch Algorithm (Probabilistic Recomputation):** Background workers recompute the cache key *before* it actually expires if a random threshold based on read compute cost and remaining TTL is met.",
+    "pitfalls": "Relying purely on database connection pooling limits. Squeezing connection pools without request coalescing simply turns database crashes into HTTP 504 connection timeouts.",
+    "key_takeaway": "Use request coalescing (Singleflight) in application code and TTL jitter in caching to prevent cache stampedes from drowning downstream databases."
+  },
+  {
+    "id": "sre-003",
+    "title": "Cascading Failure via Health Check Flapping & Load Shedding",
+    "domain": "Site Reliability Engineering (SRE)",
+    "difficulty": "Advanced",
+    "scenario": "A cluster of 20 API pods experiences a sudden 200% traffic spike. Because CPU hits 95%, pods become slightly slower to respond to Kubernetes `/healthz` liveness probes. Kubernetes declares 4 pods unhealthy and terminates them. The remaining 16 pods instantly receive the diverted traffic, causing their CPU to hit 99%, failing their probes, and triggering a total cluster death spiral.",
+    "question": "Why did the health checks cause this total outage, what is the critical architectural distinction between Liveness and Readiness probes, and how should Load Shedding be implemented to preserve service availability under extreme load?",
+    "hints": [
+      "Liveness probes should NEVER check external dependencies or high-load conditions.",
+      "Readiness removes traffic from load balancers without killing the process."
+    ],
+    "answer": "1. **Root Cause:**\n- **Liveness Probe Misuse:** The liveness probe was checking application responsiveness or performing heavy health checks under load. When CPU saturated, the probe timed out, triggering Kubernetes to kill healthy (but overloaded) pods. Terminating pods during high load concentrates even more traffic onto the surviving pods, causing instantaneous domino failure.\n\n2. **Probe Distinction:**\n- **Liveness Probe:** \"Is the process deadlocked or corrupt?\" (e.g. fatal infinite loop, unhandled panic). If it fails, restart the container. Should be a lightweight in-memory check (e.g. basic HTTP 200 without DB queries).\n- **Readiness Probe:** \"Can this container accept user traffic right now?\" If it fails, remove the pod from Service endpoints/load balancers **without killing it**, allowing it to drain and cool down.\n\n3. **Load Shedding Pattern:**\nUnder extreme load, the service must shed excess traffic early with `HTTP 429 Too Many Requests` or `HTTP 503` rather than queuing requests until memory exhausts:\n- Use adaptive concurrency limits (e.g. Netflix Concurrency Limits / TCP Vegas algorithm).\n- Reject low-priority background traffic (e.g. analytics, batch sync) while prioritizing critical paths (checkout, payments).",
+    "pitfalls": "Putting database `SELECT 1` or external API checks in Kubernetes Liveness probes. If your DB stutters, Kubernetes will kill all application pods across your entire fleet at once.",
+    "key_takeaway": "Liveness probes should only restart deadlocked processes, never overloaded ones. Protect services with adaptive load shedding, not pod restarts."
+  }
+]
