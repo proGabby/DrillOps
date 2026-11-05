@@ -1,0 +1,47 @@
+[
+  {
+    "id": "node-001",
+    "title": "Event Loop Microtask Starvation via process.nextTick",
+    "domain": "Node.js Backend",
+    "difficulty": "Advanced",
+    "scenario": "An Express.js / Fastify API receives incoming HTTP requests, but suddenly all incoming requests experience a 30-second socket hang up, even though CPU usage is under 15% and memory is stable. A developer introduced a recursive logging/metric processor function using `process.nextTick()`.",
+    "question": "How does the Node.js event loop schedule microtasks (`process.nextTick` vs `Promise.resolve`) compared to macrotask phases (Timers, Poll, Check), and why does recursive `process.nextTick` completely freeze network I/O?",
+    "hints": [
+      "`process.nextTick` queues do not wait for the next turn of the event loop.",
+      "The Poll phase (incoming TCP packets) cannot run while the microtask queue has pending callbacks."
+    ],
+    "answer": "1. **Event Loop vs Microtasks:**\nThe Node.js event loop has distinct macrotask phases:\n- **Timers** (`setTimeout`, `setInterval`)\n- **Pending callbacks** (system I/O)\n- **Idle, prepare**\n- **Poll** (retrieves new I/O events, incoming TCP connections, data chunks)\n- **Check** (`setImmediate`)\n- **Close callbacks** (`socket.on('close')`)\n\nHowever, `process.nextTick()` and microtasks (`Promise.then()`) are **not** phases of the event loop. They live in a separate microtask queue that runs immediately after the current JavaScript operation finishes, **before** the event loop transitions to the next phase.\n\n2. **Starvation Root Cause:**\nNode.js will completely drain the `nextTickQueue` before moving to the Poll phase. If a function recursively calls `process.nextTick()`, the queue never empties. The event loop is prevented from ever reaching the Poll phase, meaning incoming TCP connections or incoming packets on existing sockets are never processed by libuv.\n\n3. **Fix:**\nReplace recursive `process.nextTick()` with `setImmediate()`. `setImmediate()` places the callback in the Check phase of the event loop, guaranteeing that libuv is allowed to poll for network I/O between executions.",
+    "pitfalls": "Believing that `process.nextTick` is equivalent to `setTimeout(fn, 0)` or `setImmediate`. `nextTick` executes synchronously right after the current call stack, not on the next loop tick.",
+    "key_takeaway": "Never use recursive `process.nextTick()`. Use `setImmediate()` to yield control back to the event loop so network I/O can be processed."
+  },
+  {
+    "id": "node-002",
+    "title": "libuv Thread Pool Starvation & DNS Resolution Latency",
+    "domain": "Node.js Backend",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Node.js microservice encrypts password hashes (`bcrypt` / `crypto.pbkdf2`) and uploads documents to S3. Under moderate traffic, outgoing HTTP requests to external microservices start timing out with 5,000ms latency, while CPU usage on the machine is only 40%.",
+    "question": "Which Node.js core operations run inside the libuv worker thread pool (as opposed to non-blocking OS asynchronous primitives), what is the default thread pool size, and why does password hashing block HTTP client requests using domain names?",
+    "hints": [
+      "Check `UV_THREADPOOL_SIZE`.",
+      "Consider the difference between `dns.lookup` (used by default in `http.get`) and `dns.resolve`."
+    ],
+    "answer": "1. **libuv Thread Pool Scope:**\nWhile network sockets (TCP/UDP/HTTP) use non-blocking epoll/kqueue on the main thread, certain operations cannot be performed asynchronously by standard OS APIs and run in the libuv thread pool:\n- All `fs` (file system) operations\n- Crypto operations (`crypto.pbkdf2`, `crypto.randomBytes`)\n- Compression (`zlib`)\n- Synchronous DNS lookups via `dns.lookup` (calls getaddrinfo(3))\n\n2. **The Bottleneck:**\nThe default `UV_THREADPOOL_SIZE` is only **4 threads**. If 4 concurrent requests call CPU-heavy crypto functions (like bcrypt/pbkdf2), all 4 libuv threads become saturated.\nWhen the app attempts an outgoing HTTP request (e.g. `fetch('https://api.internal.service')`), Node's HTTP client uses `dns.lookup` by default, which queues behind the crypto jobs in the 4-thread pool, blocking the DNS resolution for seconds.\n\n3. **Mitigations:**\n- Increase `UV_THREADPOOL_SIZE=64` before the Node process boots.\n- Offload heavy crypto to dedicated worker threads (`worker_threads`).\n- Use `dns.resolve` (which uses c-ares and operates asynchronously on the main loop without touching the thread pool), or pass an IP address / custom DNS agent with connection pooling (e.g. `undici.Agent`).",
+    "pitfalls": "Trying to set `process.env.UV_THREADPOOL_SIZE = 64` inside JavaScript code. It must be set as an environment variable before the Node.js runtime binary starts (`UV_THREADPOOL_SIZE=64 node server.js`).",
+    "key_takeaway": "The default libuv thread pool is only 4 threads. Saturating it with crypto or disk I/O will silently stall all standard `dns.lookup` calls."
+  },
+  {
+    "id": "node-003",
+    "title": "Stream Backpressure & Heap Out-of-Memory on File Streaming",
+    "domain": "Node.js Backend",
+    "difficulty": "Intermediate",
+    "scenario": "A Node.js service streams a 5GB CSV export from PostgreSQL directly to an S3 bucket or slow client over an HTTP response stream using `readable.on('data', chunk => writable.write(chunk))`. Under test, the Node process crashes with `FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory`.",
+    "question": "What is stream backpressure in Node.js, why did the manual `on('data')` loop bypass backpressure, and what is the modern, safe way to pipe streams with proper error propagation?",
+    "hints": [
+      "`writable.write(chunk)` returns a boolean indicating whether the buffer is full.",
+      "Check `stream.pipeline` / `pipeline` from `stream/promises`."
+    ],
+    "answer": "1. **Root Cause:**\nThe readable stream (reading from database or disk) produces chunks much faster than the slow network socket can transmit them.\n`writable.write(chunk)` returns `false` when its internal buffer (`highWaterMark`) is full. By calling `writable.write()` unconditionally inside `readable.on('data')`, Node buffers all unconsumed chunks in V8 heap memory until the 1.4GB / 2GB heap limit is breached, crashing the process.\n\n2. **Modern Solution:**\nNever manually wire `on('data')` without handling the `drain` event and pausing the readable. Instead, use `stream/promises` `pipeline`:\n\n```javascript\nimport { pipeline } from 'node:stream/promises';\n\nawait pipeline(\n  readableStream,\n  transformStream,\n  writableStream\n);\n```\n`pipeline` automatically:\n- Handles backpressure (pauses reading when the destination buffer is saturated and resumes on `drain`).\n- Cleans up and destroys all streams if any stream encounters an error (preventing file descriptor and memory leaks).",
+    "pitfalls": "Using `readable.pipe(writable)` without attaching error handlers. `pipe()` does NOT clean up destination streams if the source throws an error.",
+    "key_takeaway": "Always use `stream/promises.pipeline` instead of `readable.pipe()` or manual `on('data')` to automatically manage backpressure and lifecycle cleanup."
+  }
+]
