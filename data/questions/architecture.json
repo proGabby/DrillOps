@@ -1,0 +1,32 @@
+[
+  {
+    "id": "arch-001",
+    "title": "Idempotent API Design in Distributed Payments",
+    "domain": "Distributed Architecture",
+    "difficulty": "Advanced",
+    "scenario": "A mobile user taps 'Pay $50'. Due to poor cellular connectivity, the client's TCP connection drops before receiving the HTTP 200 response from your payment service. The mobile client retries the exact same request 2 seconds later. Without proper idempotency, the user is charged twice.",
+    "question": "How do you design a robust Idempotency-Key pattern using Redis and a relational database that handles: (1) concurrent identical requests arriving at the same millisecond, (2) in-flight requests that haven't finished, and (3) returning the original response payload on retries without re-executing business logic?",
+    "hints": [
+      "Use atomic distributed locking or database unique constraints on the `idempotency_key`.",
+      "Track three distinct lifecycle states: `IN_PROGRESS`, `SUCCESS`, and `FAILED`."
+    ],
+    "answer": "1. **Lifecycle States & Storage:**\nStore idempotency records in PostgreSQL/MySQL or Redis with three states:\n- `IN_PROGRESS` (with request hash and expiration timestamp)\n- `SUCCESS` (stores the serialized response status code and JSON body)\n- `FAILED` (stores error details or allows retry)\n\n2. **Handling Concurrent Requests (Races):**\nWhen a request with header `Idempotency-Key: <UUID>` arrives:\n- Perform an atomic insert or lock: `INSERT INTO idempotency_keys (key, user_id, status, req_hash) VALUES (...) ON CONFLICT (key) DO NOTHING` or `SET key IN_PROGRESS NX EX 60` in Redis.\n- If the insert fails because a row already exists:\n  - If `status == IN_PROGRESS`: Return `HTTP 409 Conflict` with header `Retry-After: 2` (or wait briefly on a lock), indicating that the original request is still processing.\n  - If `status == SUCCESS`: Do **not** execute payment logic. Immediately return the stored response body and headers from the original execution.\n\n3. **Payload Verification:**\nHash the incoming request payload (`req_hash = sha256(body)`). If a retry arrives with an identical `Idempotency-Key` but a different body (e.g. amount is now $100 instead of $50), immediately return `HTTP 422 Unprocessable Entity` or `HTTP 400 Bad Request` to prevent key hijacking.",
+    "pitfalls": "Marking the idempotency key as completed *before* the database transaction commits. If the DB rollbacks, subsequent retries will falsely think the payment succeeded.",
+    "key_takeaway": "An Idempotency-Key must track `IN_PROGRESS` state to block concurrent races, store the exact response body for replays, and validate payload checksums."
+  },
+  {
+    "id": "arch-002",
+    "title": "Database Connection Pool Exhaustion in Microservices",
+    "domain": "Distributed Architecture",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Go backend microservice runs 15 instances in Kubernetes connected to an AWS RDS PostgreSQL instance with `max_connections = 300`. During normal traffic, each pod is configured with `db.SetMaxOpenConns(50)` (total possible connections = 750). When a third-party webhook API slows down from 50ms to 4,000ms, the entire database connection pool saturates within seconds, crashing all services across the company.",
+    "question": "Why did an external API slowdown cause internal database connection starvation, and what architectural adjustments (transaction scope, proxying, pool sizing) prevent this systemic collapse?",
+    "hints": [
+      "Never hold a database connection open while waiting for external network I/O.",
+      "Connection pools should be sized via Little's Law, and PgBouncer can pool transactions."
+    ],
+    "answer": "1. **Root Cause:**\nThe application opened a database transaction `tx, err := db.Begin()`, performed an initial query, and then called the slow third-party external webhook API *while still holding `tx` open*. Because the external API slowed down to 4s, each worker held its database connection idle for 4,000ms. All 50 connections per pod quickly saturated, hitting PostgreSQL's `max_connections = 300` and locking out all other microservices.\n\n2. **Rules to Fix:**\n- **Never perform network I/O inside DB transactions:** Complete all external API calls *before* opening `db.Begin()`, or use an outbox pattern / background queue.\n- **Connection Pool Sizing Formula (PostgreSQL):**\n  `connections = ((core_count * 2) + effective_spindle_count)`. Sizing pools larger than PostgreSQL's CPU capacity causes thread context switching thrashing.\n- **Use Connection Pooler (PgBouncer):** Deploy PgBouncer in **transaction pooling** mode (`pool_mode = transaction`). Instead of tying a physical server connection to an application client for the entire lifecycle, PgBouncer assigns a server connection only for the millisecond duration of an active transaction.",
+    "pitfalls": "Thinking larger connection pools (`MaxOpenConns = 1000`) make databases faster. In relational databases, excessive open connections degrade throughput due to OS context switching and buffer cache contention.",
+    "key_takeaway": "Never make external HTTP/network calls inside a database transaction, and size DB pools conservatively using transaction pooling (PgBouncer)."
+  }
+]
