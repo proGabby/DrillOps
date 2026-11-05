@@ -36,7 +36,7 @@ An automated 2-phase daily technical challenge pipeline designed to sharpen prod
 
 CallMeBot is a free, reliable gateway to send personal WhatsApp messages without 72-hour sandbox timeouts:
 
-1. Add the phone number **`+34 644 44 24 99`** or **`+34 644 87 23 93`** to your phone contacts as *CallMeBot*.
+1. Add the active CallMeBot phone number **`+34 644 95 42 75`** (or **`+34 623 78 64 49`** / **`+34 644 26 33 77`**) to your phone contacts as *CallMeBot*. (Check [callmebot.com](https://www.callmebot.com/blog/free-api-whatsapp-messages/) if you ever need the latest active number).
 2. Open WhatsApp and send the following message to that contact:
    ```text
    I allow callmebot to send me messages
