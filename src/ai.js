@@ -1,9 +1,9 @@
 import { CONFIG } from './config.js';
 
 /**
- * Call Google Gemini REST API for lightweight dynamic enrichment
+ * Call Google Gemini REST API for lightweight dynamic enrichment and chat
  */
-async function callGemini(systemPrompt, userPrompt) {
+async function callGemini(systemPrompt, userPrompt, maxOutputTokens = 800) {
   if (!CONFIG.gemini.apiKey) {
     return null;
   }
@@ -15,12 +15,12 @@ async function callGemini(systemPrompt, userPrompt) {
       contents: [
         {
           role: 'user',
-          parts: [{ text: `${systemPrompt}\n\nTask:\n${userPrompt}` }]
+          parts: [{ text: `${systemPrompt}\n\nTask / User Message:\n${userPrompt}` }]
         }
       ],
       generationConfig: {
         temperature: 0.7,
-        maxOutputTokens: 500
+        maxOutputTokens
       }
     };
 
@@ -39,7 +39,7 @@ async function callGemini(systemPrompt, userPrompt) {
     const candidate = data.candidates?.[0]?.content?.parts?.[0]?.text;
     return candidate ? candidate.trim() : null;
   } catch (err) {
-    console.warn(`[AI Warning] Failed to reach Gemini API: ${err.message}. Proceeding with curated bank.`);
+    console.warn(`[AI Warning] Failed to reach Gemini API: ${err.message}.`);
     return null;
   }
 }
@@ -58,7 +58,7 @@ Keep it strictly under 50 words. Do NOT provide the answer or solution.`;
 Scenario: ${question.scenario}
 Generate a 2-sentence realistic mock log line or incident alert notification that an engineer would see on Slack or PagerDuty for this scenario.`;
 
-  return await callGemini(system, user);
+  return await callGemini(system, user, 300);
 }
 
 /**
@@ -74,5 +74,50 @@ Provide one concise "Staff Engineer War Story / Pro-Tip" (maximum 3 bullet point
 Answer Summary: ${question.answer}
 Provide a high-yield pro-tip or real-world pitfall to watch out for in production.`;
 
-  return await callGemini(system, user);
+  return await callGemini(system, user, 400);
+}
+
+/**
+ * Interactive 2-Way AI Mentor Chat
+ * Evaluates solutions, answers questions, and provides progressive hints.
+ */
+export async function askAIAssistant(userMessage, activeDrill = null) {
+  if (!CONFIG.gemini.apiKey) {
+    return `🤖 *AI Mentor Notice:*\n\nTo enable interactive AI chat with me, please add your free Google Gemini API key to your \`.env\` file:\n\`GEMINI_API_KEY=AIzaSy...\`\n\nGet a free key in 30 seconds at: https://aistudio.google.com/app/apikey`;
+  }
+
+  let contextInfo = '';
+  if (activeDrill && activeDrill.question) {
+    const q = activeDrill.question;
+    contextInfo = `
+Current Active Drill Context:
+- Track: ${activeDrill.topic?.name || q.domain}
+- Title: ${q.title}
+- Difficulty: ${q.difficulty}
+- Scenario: ${q.scenario}
+- Challenge Question: ${q.question}
+- Hints: ${JSON.stringify(q.hints || [])}
+- Official Solution: ${q.answer}
+- Common Pitfalls: ${q.pitfalls || 'N/A'}
+- Key Takeaway: ${q.key_takeaway || 'N/A'}
+`;
+  }
+
+  const system = `You are an elite Principal Distributed Systems Architect, Senior Staff SRE, and Technical Interviewer serving as the personal AI mentor for the "Daily Tech Drill" platform.
+
+You communicate with senior engineering precision, clarity, and depth.
+${contextInfo}
+
+Your Guidelines:
+1. If the user asks for a hint for today's drill, provide a progressive conceptual nudge or Socratic clue without prematurely spoiling the answer.
+2. If the user submits their own solution, analysis, or code:
+   - Validate what is correct.
+   - Critique edge cases, concurrency hazards, memory/CPU bottlenecks, or production failure modes they missed.
+   - Give them actionable constructive feedback like a senior interviewer.
+3. If the user asks general engineering questions (Go, Node.js, Kubernetes, Linux, SRE, Kafka, Redis, Distributed Architecture), give insightful, practical explanations with real-world production context.
+4. If the user asks for the solution or asks to solve today's challenge, provide a structured architectural walkthrough.
+5. Format your output cleanly for Telegram. Use *bold*, _italic_, and \`inline code\` or \`\`\`code blocks\`\`\`. Keep paragraphs readable on mobile.`;
+
+  const reply = await callGemini(system, userMessage, 1000);
+  return reply || "⚠️ Sorry, I had trouble reaching the AI service right now. Please try again in a few moments.";
 }

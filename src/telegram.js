@@ -5,7 +5,6 @@ import { CONFIG } from './config.js';
  */
 export function formatForTelegram(text) {
   if (!text) return '';
-  // Standardize bold and code fences
   return text.trim();
 }
 
@@ -26,31 +25,44 @@ export async function sendTelegramMessage(messageText, options = { dryRun: false
     throw new Error('Telegram requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.');
   }
 
-  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  return await sendTelegramReply(chatId, messageText);
+}
 
-  // First try sending with Markdown formatting
+/**
+ * Send reply to a specific Telegram chat (with markdown and clean text fallback)
+ */
+export async function sendTelegramReply(targetChatId, messageText, replyToMessageId = null) {
+  const { botToken } = CONFIG.telegram;
+  if (!botToken) {
+    throw new Error('Telegram requires TELEGRAM_BOT_TOKEN environment variable.');
+  }
+
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const bodyPayload = {
+    chat_id: targetChatId,
+    text: messageText,
+    parse_mode: 'Markdown'
+  };
+
+  if (replyToMessageId) {
+    bodyPayload.reply_to_message_id = replyToMessageId;
+  }
+
   let response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: messageText,
-      parse_mode: 'Markdown'
-    })
+    body: JSON.stringify(bodyPayload)
   });
 
   let data = await response.json();
 
-  // If Telegram rejects markdown formatting, fall back to plain text so delivery never fails
+  // If Markdown formatting fails, fall back to plain text
   if (!data.ok) {
-    console.warn(`[Telegram Notice] Markdown formatting rejected (${data.description}), sending as clean text...`);
+    bodyPayload.parse_mode = undefined;
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: messageText
-      })
+      body: JSON.stringify(bodyPayload)
     });
     data = await response.json();
   }
@@ -62,3 +74,60 @@ export async function sendTelegramMessage(messageText, options = { dryRun: false
   return { success: true, provider: 'telegram', messageId: data.result?.message_id };
 }
 
+/**
+ * Send "typing..." chat action indicator while generating response
+ */
+export async function sendChatAction(targetChatId, action = 'typing') {
+  const { botToken } = CONFIG.telegram;
+  if (!botToken) return;
+
+  try {
+    const url = `https://api.telegram.org/bot${botToken}/sendChatAction`;
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: targetChatId, action })
+    });
+  } catch (err) {
+    // Ignore transient chat action errors
+  }
+}
+
+/**
+ * Verify bot token and return bot identity
+ */
+export async function getBotInfo() {
+  const { botToken } = CONFIG.telegram;
+  if (!botToken) {
+    throw new Error('TELEGRAM_BOT_TOKEN is missing.');
+  }
+
+  const url = `https://api.telegram.org/bot${botToken}/getMe`;
+  const response = await fetch(url);
+  const data = await response.json();
+
+  if (!data.ok) {
+    throw new Error(`Invalid Telegram Bot Token: ${data.description}`);
+  }
+
+  return data.result;
+}
+
+/**
+ * Long-poll Telegram for incoming updates
+ */
+export async function getUpdates(offset = 0, timeout = 30) {
+  const { botToken } = CONFIG.telegram;
+  if (!botToken) return [];
+
+  const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=${timeout}`;
+
+  try {
+    const response = await fetch(url, { method: 'GET' });
+    const data = await response.json();
+    return data.ok ? data.result : [];
+  } catch (err) {
+    console.warn(`[Telegram Poll Warning] ${err.message}`);
+    return [];
+  }
+}
