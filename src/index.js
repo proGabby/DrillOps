@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { buildMorningChallenge, buildEveningSolution, TOPIC_SCHEDULE } from './engine.js';
-import { sendWhatsAppMessage } from './whatsapp.js';
+import { sendNotification } from './notifier.js';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -67,17 +67,17 @@ async function run() {
       const { message, drillState } = await buildMorningChallenge(options.topic);
       console.log(`[Drill Pipeline] Morning challenge generated for: ${drillState.question.title} (${drillState.topic.name})`);
       
-      const res = await sendWhatsAppMessage(message, { dryRun: options.dryRun });
+      const res = await sendNotification(message, { dryRun: options.dryRun });
       if (res.success) {
-        console.log(`[Drill Pipeline] ✅ Morning challenge successfully dispatched.`);
+        console.log(`[Drill Pipeline] ✅ Morning challenge successfully dispatched via ${res.provider || 'notification'}.`);
       }
     } else if (options.phase === 'evening') {
       const { message, questionId } = await buildEveningSolution();
       console.log(`[Drill Pipeline] Evening solution generated for drill ID: ${questionId}`);
 
-      const res = await sendWhatsAppMessage(message, { dryRun: options.dryRun });
+      const res = await sendNotification(message, { dryRun: options.dryRun });
       if (res.success) {
-        console.log(`[Drill Pipeline] ✅ Evening deep dive successfully dispatched.`);
+        console.log(`[Drill Pipeline] ✅ Evening deep dive successfully dispatched via ${res.provider || 'notification'}.`);
       }
     } else {
       console.error(`[Error] Unknown phase: '${options.phase}'. Must be 'morning' or 'evening'.`);

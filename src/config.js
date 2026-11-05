@@ -29,7 +29,11 @@ export function loadEnv() {
 loadEnv();
 
 export const CONFIG = {
-  provider: process.env.WHATSAPP_PROVIDER || 'callmebot',
+  provider: process.env.NOTIFICATION_PROVIDER || process.env.WHATSAPP_PROVIDER || 'telegram',
+  telegram: {
+    botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    chatId: process.env.TELEGRAM_CHAT_ID || ''
+  },
   callmebot: {
     phone: process.env.CALLMEBOT_PHONE || '',
     apiKey: process.env.CALLMEBOT_API_KEY || ''
