@@ -2,7 +2,7 @@
   {
     "id": "node-001",
     "title": "Event Loop Microtask Starvation via process.nextTick",
-    "domain": "Node.js Backend",
+    "domain": "Node.js Backend & Libuv",
     "difficulty": "Advanced",
     "scenario": "An Express.js / Fastify API receives incoming HTTP requests, but suddenly all incoming requests experience a 30-second socket hang up, even though CPU usage is under 15% and memory is stable. A developer introduced a recursive logging/metric processor function using `process.nextTick()`.",
     "question": "How does the Node.js event loop schedule microtasks (`process.nextTick` vs `Promise.resolve`) compared to macrotask phases (Timers, Poll, Check), and why does recursive `process.nextTick` completely freeze network I/O?",
@@ -17,7 +17,7 @@
   {
     "id": "node-002",
     "title": "libuv Thread Pool Starvation & DNS Resolution Latency",
-    "domain": "Node.js Backend",
+    "domain": "Node.js Backend & Libuv",
     "difficulty": "Intermediate-Advanced",
     "scenario": "A Node.js microservice encrypts password hashes (`bcrypt` / `crypto.pbkdf2`) and uploads documents to S3. Under moderate traffic, outgoing HTTP requests to external microservices start timing out with 5,000ms latency, while CPU usage on the machine is only 40%.",
     "question": "Which Node.js core operations run inside the libuv worker thread pool (as opposed to non-blocking OS asynchronous primitives), what is the default thread pool size, and why does password hashing block HTTP client requests using domain names?",
@@ -32,7 +32,7 @@
   {
     "id": "node-003",
     "title": "Stream Backpressure & Heap Out-of-Memory on File Streaming",
-    "domain": "Node.js Backend",
+    "domain": "Node.js Backend & Libuv",
     "difficulty": "Intermediate",
     "scenario": "A Node.js service streams a 5GB CSV export from PostgreSQL directly to an S3 bucket or slow client over an HTTP response stream using `readable.on('data', chunk => writable.write(chunk))`. Under test, the Node process crashes with `FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory`.",
     "question": "What is stream backpressure in Node.js, why did the manual `on('data')` loop bypass backpressure, and what is the modern, safe way to pipe streams with proper error propagation?",
@@ -43,5 +43,260 @@
     "answer": "1. **Root Cause:**\nThe readable stream (reading from database or disk) produces chunks much faster than the slow network socket can transmit them.\n`writable.write(chunk)` returns `false` when its internal buffer (`highWaterMark`) is full. By calling `writable.write()` unconditionally inside `readable.on('data')`, Node buffers all unconsumed chunks in V8 heap memory until the 1.4GB / 2GB heap limit is breached, crashing the process.\n\n2. **Modern Solution:**\nNever manually wire `on('data')` without handling the `drain` event and pausing the readable. Instead, use `stream/promises` `pipeline`:\n\n```javascript\nimport { pipeline } from 'node:stream/promises';\n\nawait pipeline(\n  readableStream,\n  transformStream,\n  writableStream\n);\n```\n`pipeline` automatically:\n- Handles backpressure (pauses reading when the destination buffer is saturated and resumes on `drain`).\n- Cleans up and destroys all streams if any stream encounters an error (preventing file descriptor and memory leaks).",
     "pitfalls": "Using `readable.pipe(writable)` without attaching error handlers. `pipe()` does NOT clean up destination streams if the source throws an error.",
     "key_takeaway": "Always use `stream/promises.pipeline` instead of `readable.pipe()` or manual `on('data')` to automatically manage backpressure and lifecycle cleanup."
+  },
+  {
+    "id": "node-004",
+    "title": "V8 Garbage Collection: Scavenge (Minor GC) vs Mark-Sweep-Compact (Major GC)",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "A high-concurrency Node.js API processing millions of WebSocket messages per minute begins exhibiting periodic 800ms event loop latency spikes. CPU profiling indicates the main thread is frozen inside V8 `MarkSweepCompact` garbage collection routines.",
+    "question": "How does V8 divide memory into New Space (Semi-space Young Generation) and Old Space, what triggers promotion from New to Old space, and how do object allocation churn patterns turn fast Scavenge cycles into catastrophic Major GC freezes?",
+    "hints": [
+      "New space is split into From-Space and To-Space and collected via the Cheney Scavenger algorithm.",
+      "Objects surviving two minor GC cycles are promoted to Old Space, where Major GC requires expensive marking and compaction."
+    ],
+    "answer": "1. **V8 Memory Spaces:**\n- **New Space (Young Generation):** Dedicated to newly allocated objects. Sized between 16MB and 64MB. Highly dynamic.\n- **Old Space (Old Generation):** Holds long-lived objects that survived Young Generation collections.\n\n2. **Scavenge Algorithm (Minor GC):**\nNew Space is split into two halves: **From-Space** and **To-Space**.\n- When From-Space fills, Minor GC kicks in: alive objects are copied to To-Space; dead objects are abandoned.\n- The roles of From-Space and To-Space swap. This Cheney copying GC is extremely fast (1-5ms).\n- **Promotion:** If an object survives two Scavenge passes (or To-Space exceeds 25% capacity), it is **promoted to Old Space**.\n\n3. **The Major GC Bottleneck:**\nIf application code creates large numbers of objects that live just long enough to escape New Space (e.g. caching objects in memory for 10 seconds), they are promoted to Old Space. Old Space is collected via **Mark-Sweep-Compact**:\n- Scans the entire multi-gigabyte heap.\n- Compares pointers and moves memory pages to eliminate fragmentation.\n- Freezes the single-threaded Node.js event loop for hundreds of milliseconds.",
+    "pitfalls": "Holding short-lived temporary objects in global arrays or closures just long enough to trigger promotion to Old Space, leading to frequent Major GC freezes.",
+    "key_takeaway": "Keep object lifespans short so they are collected cheaply in V8 New Space; avoid holding medium-lived objects in memory that force expensive Old Space Mark-Sweep GC."
+  },
+  {
+    "id": "node-005",
+    "title": "Memory Leak Diagnosis: Retaining Paths & Closures in V8 Heap Snapshots",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Node.js production service consumes an additional 50MB of RAM every hour until hitting the 1.4GB default heap limit and crashing. A developer reviews the code but finds no global arrays. Heap snapshots taken via `v8.writeHeapSnapshot()` reveal millions of `(closure)` and `IncomingMessage` objects retained in memory.",
+    "question": "How do closures in JavaScript retain variables from outer lexical scopes even when those variables are not directly referenced, and how do you analyze Retaining Paths in Chrome DevTools to locate the memory leak root?",
+    "hints": [
+      "In V8, all closures created in the same parent scope share the exact same Context object.",
+      "Look for the 'Distance' and 'Retainers' tree in Chrome DevTools Heap Profiler."
+    ],
+    "answer": "1. **The Shared Lexical Context Gotcha (Meteor Leak):**\nIn V8, closures in the same outer function scope share a single hidden lexical **`Context`** object:\n```javascript\nfunction requestHandler(req, res) {\n    const massiveBuffer = Buffer.alloc(10 * 1024 * 1024); // 10MB\n    function unusedClosure() { massiveBuffer.length; } // References massiveBuffer\n    \n    // Event emitter listener holds small callback\n    globalEmitter.on('metric', () => { console.log('metric emitted'); });\n}\n```\nEven though the `metric` callback does not mention `massiveBuffer`, both closures share the same scope Context. As long as `globalEmitter` holds the `metric` listener, `massiveBuffer` is **retained forever** in heap memory!\n\n2. **Diagnosing via Chrome DevTools:**\n1. Take two heap snapshots: `snapshot-1.heapsnapshot` at startup and `snapshot-2.heapsnapshot` 30 minutes later.\n2. Open Chrome -> DevTools -> Memory -> Load Snapshots.\n3. Change view to **Comparison**: sort by `# Alloc` and `Size Delta` to find growing constructors.\n4. Click on the retained object and inspect the **Retainers Tree** at the bottom: follow the retaining path up to the root (e.g. global `EventEmitter` or unremoved socket listener).",
+    "pitfalls": "Attaching `emitter.on('event', callback)` inside HTTP request handlers without corresponding `emitter.off()`. Every request adds a permanent retainer to the heap.",
+    "key_takeaway": "Always clean up event listeners (`emitter.removeListener`), and watch out for shared closure lexical contexts retaining large buffers."
+  },
+  {
+    "id": "node-006",
+    "title": "HTTP Client Connection Pooling: Undici vs AgentKeepAlive vs Global Fetch",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Node.js backend microservice makes 1,000 outgoing HTTP requests per second to downstream services. Latency is high, and Linux netstat reports 20,000 sockets stuck in `TIME_WAIT` state. CPU usage is high due to continuous TLS handshakes.",
+    "question": "Why does default Node.js `http.request` / `fetch` create new TCP/TLS connections without keep-alive, what is the socket churn cost, and how does `undici` (Node 18+ default fetch engine) optimize connection pooling and pipelining?",
+    "hints": [
+      "By default, Node's legacy `http.Agent` has `keepAlive: false`.",
+      "`undici` was built specifically to rewrite Node's HTTP stack from scratch without EventEmitter overhead."
+    ],
+    "answer": "1. **The Cost of Socket Churn (No Keep-Alive):**\nWith `keepAlive: false`, every outgoing HTTP request opens a brand-new TCP socket: 3-way TCP handshake + TLS 1.3 handshake (2-3 round trips) + socket teardown. After teardown, the OS holds the socket in `TIME_WAIT` for 60 seconds, exhausting ephemeral ports and wasting CPU on cryptography.\n\n2. **Undici Architecture (Node 18+ Built-in):**\n`undici` is Node's modern HTTP/1.1 client powering the global `fetch()`:\n- Eliminates Node's legacy `EventEmitter` and stream wrapping overhead for HTTP parsing.\n- Manages a high-performance **Connection Pool** (`undici.Pool` / `undici.Agent`) with HTTP Keep-Alive enabled by default.\n\n3. **Optimal Configuration for Microservices:**\n```javascript\nimport { setGlobalDispatcher, Agent } from 'undici';\n\n// Configure centralized connection pooling for global fetch\nsetGlobalDispatcher(new Agent({\n  connections: 100,        // Max sockets per origin\n  pipelining: 1,           // HTTP/1.1 pipelining factor\n  keepAliveTimeout: 10000, // Keep socket idle for 10s\n  keepAliveMaxTimeout: 30000\n}));\n```\nAll subsequent `fetch('https://...')` calls automatically reuse open TCP/TLS connections.",
+    "pitfalls": "Using legacy `axios` or `http.get` without configuring a custom `http.Agent({ keepAlive: true })`. You will experience frequent `ECONNRESET` and socket exhaustion under load.",
+    "key_takeaway": "Always reuse TCP/TLS connections via HTTP Keep-Alive using `undici.Agent` or `agentkeepalive` to eliminate handshake latency and ephemeral socket exhaustion."
+  },
+  {
+    "id": "node-007",
+    "title": "Scaling Models: Cluster Module vs Worker Threads vs Container Scaling",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A development team deploys a CPU-heavy image resizing service in Node.js on an 8-core AWS EC2 instance. The server struggles at 100% CPU on Core 0 while the remaining 7 CPU cores sit at 0% utilization.",
+    "question": "Compare Node's single-threaded event loop limitation across three solutions: (1) `node:cluster` module, (2) `node:worker_threads`, and (3) Containerized horizontal scaling (Kubernetes/ECS). When is each model appropriate?",
+    "hints": [
+      "`cluster` forks multiple separate OS processes sharing the same TCP port.",
+      "`worker_threads` run multiple threads with shared memory inside a single process."
+    ],
+    "answer": "1. **The Three Scaling Architectures:**\n\n- **1. Cluster Module (`node:cluster`):**\n  - *Mechanism:* Master process calls `child_process.fork()` to spawn N worker processes (one per CPU core) and uses round-robin IPC to distribute incoming TCP connections across the workers.\n  - *Pros:* Zero shared memory bugs; if one worker crashes, others stay alive.\n  - *Cons:* Separate memory heaps (high memory footprint); complex inter-process caching.\n\n- **2. Worker Threads (`node:worker_threads`):**\n  - *Mechanism:* Spawns multiple threads within the **same** Node.js process. Threads have separate event loops and V8 isolates, but can share memory via `SharedArrayBuffer`.\n  - *Best Use Case:* CPU-bound tasks within an existing app (image resizing, cryptographic hashing, complex PDF generation) without blocking the main event loop.\n\n- **3. Container Horizontal Scaling (Kubernetes / ECS - Industry Standard):**\n  - *Mechanism:* Run 1 single-process Node container per pod. Use Kubernetes Service / Cloud Load Balancers to distribute traffic across pods across multiple VMs.\n  - *Best Use Case:* General production deployments. Easier logging, autoscaling via HPA, and blast-radius isolation.",
+    "pitfalls": "Using `worker_threads` for I/O-bound tasks (database queries, HTTP calls). The main thread event loop is already non-blocking; spawning worker threads for I/O only adds context-switching overhead.",
+    "key_takeaway": "Use Kubernetes container replication for general traffic scaling, and reserve `worker_threads` strictly for offloading isolated CPU-heavy computation from the main event loop."
+  },
+  {
+    "id": "node-008",
+    "title": "AsyncLocalStorage: Request Context & Tracing Without Prop Drilling",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A complex enterprise Express API has 15 layers of nested functions and database repositories. The SRE team mandates that every log line include `requestId`, `userId`, and `traceId`. Developers are currently passing a `context` object as a parameter through hundreds of functions.",
+    "question": "What is `AsyncLocalStorage` in Node.js, how does it track asynchronous execution context across promises and callbacks without parameter drilling, and what is its performance overhead?",
+    "hints": [
+      "`AsyncLocalStorage` is the Node.js equivalent of ThreadLocal in Java/C#.",
+      "It hooks into V8's `async_hooks` engine to propagate state across promise microtasks."
+    ],
+    "answer": "1. **What is `AsyncLocalStorage`?**\n`node:async_hooks` provides `AsyncLocalStorage` (ALS), which enables storing state throughout the entire lifecycle of an asynchronous request, across callbacks, promises, and I/O boundaries, without passing parameters:\n\n```javascript\nimport { AsyncLocalStorage } from 'node:async_hooks';\n\nexport const requestStore = new AsyncLocalStorage();\n\n// Middleware: wrap execution in store context\napp.use((req, res, next) => {\n  const context = {\n    requestId: req.headers['x-request-id'] || crypto.randomUUID(),\n    userId: req.auth?.userId\n  };\n  requestStore.run(context, () => next());\n});\n\n// Deep inside any service or database layer:\nfunction queryDatabase() {\n  const ctx = requestStore.getStore();\n  logger.info(`[${ctx?.requestId}] Querying orders table...`);\n}\n```\n\n2. **Mechanism & Performance:**\nALS leverages V8 native async promise hooks. Whenever a Promise is created or resolved, V8 propagates the current async context pointer. In modern Node.js (v18+), ALS overhead is under 2-3% CPU overhead, making it ideal for distributed tracing and structured logging.",
+    "pitfalls": "Using `asyncLocalStorage.enterWith()`. `enterWith()` transitions context globally and leaks state across concurrent HTTP requests. Always use `asyncLocalStorage.run(store, callback)`.",
+    "key_takeaway": "Use `AsyncLocalStorage.run()` to cleanly propagate request IDs and trace contexts across deep asynchronous call stacks without parameter drilling."
+  },
+  {
+    "id": "node-009",
+    "title": "Unhandled Rejections & Uncaught Exceptions: Why the Process Must Die",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate",
+    "scenario": "A developer adds a global error catcher to prevent their Node.js server from ever crashing:\n```javascript\nprocess.on('uncaughtException', (err) => {\n  console.error('Caught global error:', err);\n  // Intentionally NOT calling process.exit()\n});\n```\nAfter running for 3 days, database queries start corrupting data, memory climbs uncontrollably, and sockets hang indefinitely.",
+    "question": "Why is resuming execution after an `uncaughtException` dangerous in Node.js, what happens to application memory and socket state, and what is the proper graceful restart sequence?",
+    "hints": [
+      "An uncaught exception indicates that the application is in an undefined, corrupted state.",
+      "You should log, drain active connections, and call `process.exit(1)`."
+    ],
+    "answer": "1. **The Danger of Continuing After `uncaughtException`:**\nBy definition, an `uncaughtException` occurs when an error was not handled by any `try/catch` or promise handler. At this point, the JavaScript call stack has unwound unpredictably:\n- Memory references, locks, and closures may be half-allocated.\n- Database transactions may be left uncommitted or un-rolled-back.\n- Event listeners may be leaked.\nContinuing to process subsequent user requests in a corrupted V8 memory state inevitably causes silent data corruption and cascading failures.\n\n2. **The Mandatory Crash Protocol:**\nWhen `uncaughtException` occurs:\n1. Log the fatal error and stack trace immediately.\n2. Stop the HTTP server from accepting new connections (`server.close()`).\n3. Allow in-flight requests a short grace period (e.g. 5 seconds) to drain.\n4. Exit the process with failure code: `process.exit(1)`.\n5. Let the process supervisor (Kubernetes, systemd, or PM2) launch a fresh, healthy container.",
+    "pitfalls": "Thinking you can \"catch and ignore\" uncaught exceptions to achieve 100% uptime. You trade clean restarts for silent state corruption.",
+    "key_takeaway": "Never swallow `uncaughtException`. Log the fatal error, close the listener, and immediately terminate with `process.exit(1)` to let Kubernetes restart a fresh pod."
+  },
+  {
+    "id": "node-010",
+    "title": "EventLoopUtilization (ELU) vs CPU Percentage: Accurate Lag Detection",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "A Node.js microservice running on a 16-core cloud VM exhibits terrible response latency. However, CPU utilization reported by AWS CloudWatch and `top` shows only 6.25% CPU usage ($1/16$), leading the team to believe CPU is not the bottleneck.",
+    "question": "Why does multi-core OS CPU percentage give a misleading signal for single-threaded Node.js applications, and how does `perf_hooks.eventLoopUtilization()` (ELU) accurately reflect event loop saturation?",
+    "hints": [
+      "A single-threaded process running 100% on one core displays as 100 / TotalCores% in OS metrics.",
+      "ELU measures the ratio of time the event loop spent executing JavaScript vs idling."
+    ],
+    "answer": "1. **The Multi-Core Metric Illusion:**\nBecause Node's main event loop runs on a single thread, it can only ever consume 1 physical CPU core. On a 16-core machine, a completely saturated event loop (100% blocked) will report as: $\\frac{1}{16} = 6.25\\%$ total CPU utilization on host metrics! Engineers monitoring host CPU assume the service has plenty of headroom when it is completely deadlocked.\n\n2. **Event Loop Utilization (ELU):**\nIntroduced in Node.js 14 via `perf_hooks`:\n```javascript\nimport { performance } from 'node:perf_hooks';\n\nconst elu1 = performance.eventLoopUtilization();\n// ... later ...\nconst eluDiff = performance.eventLoopUtilization(elu1);\nconsole.log(`Event Loop Saturation: ${(eluDiff.utilization * 100).toFixed(2)}%`);\n```\n- **`utilization = 1.0 (100%)`**: The event loop spent 100% of its time executing JavaScript tasks and 0% idling in libuv's poll phase. Incoming I/O is starving.\n- **`utilization = 0.1 (10%)`**: Healthy system with 90% idle headroom.",
+    "pitfalls": "Relying purely on `eventLoopDelay` (measuring `setTimeout` lag). Under heavy load, timer sampling itself can be delayed or distorted; ELU provides mathematically exact runtime ratios.",
+    "key_takeaway": "Never use host CPU percentage to gauge Node.js capacity. Monitor `eventLoopUtilization()` (ELU) to know the true saturation of the main event loop thread."
+  },
+  {
+    "id": "node-011",
+    "title": "Fastify vs Express: Radix Tree Routing & Fast JSON Serialization",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate",
+    "scenario": "A benchmark shows Fastify handling 65,000 req/sec while Express tops out at 22,000 req/sec on the same hardware. An engineer wonders why Fastify achieves 3x higher throughput despite both running on the exact same Node.js runtime.",
+    "question": "What architectural innovations in Fastify (Radix Tree routing via `find-my-way` and JSON schema compilation via `fast-json-stringify`) give it significant throughput advantages over Express?",
+    "hints": [
+      "Express evaluates routes linearly using regular expressions (`path-to-regexp`).",
+      "Standard `JSON.stringify` inspects object properties dynamically at runtime."
+    ],
+    "answer": "1. **Radix Tree Routing (`find-my-way`):**\n- **Express:** Matches routes sequentially by iterating through an array of middleware and evaluating regular expressions (`path-to-regexp`). If you have 100 routes, matching the 99th route requires 99 regex checks ($O(N)$).\n- **Fastify:** Stores routes in a **Radix Tree (Prefix Tree)** data structure. Route lookup complexity is $O(K)$ where $K$ is the length of the URL path, completely independent of the number of registered endpoints.\n\n2. **Schema-Based JSON Serialization (`fast-json-stringify`):**\n- **Express:** Uses standard `JSON.stringify(payload)`. It recursively inspects object prototypes, keys, and values at runtime using slow V8 reflection.\n- **Fastify:** Compiles JSON schemas into specialized serialization functions ahead of time:\n```javascript\nfastify.get('/user', {\n  schema: {\n    response: {\n      200: {\n        type: 'object',\n        properties: { id: { type: 'integer' }, name: { type: 'string' } }\n      }\n    }\n  }\n}, handler);\n```\nFastify compiles this into a specialized string concatenation function: `'{\"id\":' + user.id + ',\"name\":\"' + user.name + '\"}'`. It skips prototype lookups, yielding 2x-3x faster JSON serialization.",
+    "pitfalls": "Using Fastify without defining JSON response schemas. Without schemas, Fastify falls back to standard `JSON.stringify`, losing its primary performance advantage.",
+    "key_takeaway": "Fastify outperforms Express by using $O(K)$ Radix Tree route lookups and compiled JSON schema serializers (`fast-json-stringify`)."
+  },
+  {
+    "id": "node-012",
+    "title": "ESM vs CommonJS: Circular Dependencies & Top-Level Await Deadlocks",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "During a migration from CommonJS (`require`) to ES Modules (`import`), an application hangs indefinitely during startup without any errors. Two modules import each other, and one module uses top-level `await` to connect to a database: `const db = await connectDB()`.",
+    "question": "What is the structural difference between CommonJS and ESM module loading (static graph parsing vs dynamic execution), how do circular dependencies behave in ESM, and why can top-level `await` cause startup deadlocks?",
+    "hints": [
+      "CommonJS evaluates synchronously when `require()` is called.",
+      "ESM evaluates in two phases: static parsing of module graph, followed by asynchronous evaluation."
+    ],
+    "answer": "1. **CommonJS vs ESM Mechanics:**\n- **CommonJS:** Dynamic and synchronous. `require()` executes the required file immediately, caches `module.exports`, and returns. Circular dependencies return a partially evaluated object.\n- **ESM:** Static and asynchronous. Operates in 3 distinct phases:\n  1. **Construction:** Resolves file paths and fetches scripts.\n  2. **Instantiation:** Creates a module record and allocates memory bindings (live bindings) for all exports without executing code.\n  3. **Evaluation:** Executes code to fill memory with real values.\n\n2. **The Top-Level Await Deadlock:**\nESM allows top-level `await`. When a module contains top-level `await`, its evaluation becomes an asynchronous Promise. If Module A awaits Module B, and Module B directly or indirectly imports Module A, a circular dependency cycle is formed in the Promise graph.\nThe module loader cannot resolve the execution order, causing the entire module evaluation tree to hang indefinitely without throwing an error.",
+    "pitfalls": "Using top-level `await` for slow or blocking external network connections (e.g. waiting for Kafka/DB connection). If the network is slow, it blocks the entire Node.js module graph evaluation before the HTTP server can even bind its health check port.",
+    "key_takeaway": "ESM uses static live bindings and two-phase evaluation; avoid top-level `await` in circular import graphs to prevent startup evaluation deadlocks."
+  },
+  {
+    "id": "node-013",
+    "title": "Buffer Allocation Security: Buffer.alloc vs Buffer.allocUnsafe Leaks",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate",
+    "scenario": "A performance-minded developer replaces `Buffer.alloc(size)` with `Buffer.allocUnsafe(size)` in a custom TCP protocol parser to avoid zero-filling memory. During penetration testing, security analysts discover that response packets occasionally contain fragments of previous database queries, plaintext passwords, and TLS session keys.",
+    "question": "Why does `Buffer.allocUnsafe` expose sensitive data from previous memory allocations, when is it safe to use, and why does Node allocate small buffers from a shared 8KB internal slab pool?",
+    "hints": [
+      "`allocUnsafe` allocates memory from the OS without zeroing out old bits.",
+      "Small buffers share an 8KB `Buffer.poolSize` slab."
+    ],
+    "answer": "1. **The Vulnerability in `Buffer.allocUnsafe`:**\n- **`Buffer.alloc(size)`:** Allocates memory and zeroes every byte. Safe, but incurs a tiny CPU overhead to overwrite bytes.\n- **`Buffer.allocUnsafe(size)`:** Requests a chunk of uninitialized memory from the V8 heap or Node's internal slab. The memory is returned containing whatever raw bytes were previously stored there by other processes, crypto functions, or HTTP handlers.\nIf the application does not overwrite **every single byte** of the buffer before transmitting it over the network, raw memory contents (including passwords, tokens, private keys) are leaked directly to external clients.\n\n2. **The 8KB Slab Allocator:**\nFor performance, Node.js pre-allocates an internal 8KB slab (`Buffer.poolSize = 8192`). Allocations $< 4\\text{KB}$ are sliced out of this single shared slab. If a small slice is retained in memory by a long-lived closure, the entire 8KB slab is prevented from being garbage-collected.",
+    "pitfalls": "Using `Buffer.allocUnsafe` and only partially writing data (e.g., allocating 1024 bytes but writing only 200 bytes). The remaining 824 bytes will contain uninitialized leaked memory.",
+    "key_takeaway": "Always use `Buffer.alloc()` by default. Only use `Buffer.allocUnsafe()` if you immediately overwrite the entire buffer length with incoming stream data."
+  },
+  {
+    "id": "node-014",
+    "title": "AbortController & Request Timeouts: Preventing Zombie Sockets",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate",
+    "scenario": "A Node.js backend queries a third-party payment gateway via `fetch()`. The third-party gateway hangs and never responds. The Node.js worker holds the socket open indefinitely, exhausting connection pools. When an engineer adds a timeout using `setTimeout()`, the promise rejects, but the underlying TCP socket remains connected and downloading data in the background.",
+    "question": "How does `AbortController` and `AbortSignal.timeout()` cancel in-flight HTTP requests and streams at the socket level, and why must abort signals be chained to client disconnects?",
+    "hints": [
+      "`AbortSignal.timeout(ms)` is built into modern Node.js 18+.",
+      "Listen to `req.on('close')` to cancel outgoing requests if the client hangs up."
+    ],
+    "answer": "1. **The Flaw with Raw `Promise.race()` Timeouts:**\nRunning `Promise.race([fetch(...), timeoutPromise])` only rejects the JavaScript promise. The underlying HTTP request and TCP socket continue running in the background, consuming socket descriptors and bandwidth (known as an orphaned zombie request).\n\n2. **Modern `AbortSignal.timeout` (Node 18+):**\n```javascript\ntry {\n  const res = await fetch('https://api.partner.com/charge', {\n    signal: AbortSignal.timeout(5000) // Hard 5-second socket timeout\n  });\n} catch (err) {\n  if (err.name === 'TimeoutError') {\n    // Node destroyed the socket and aborted HTTP transfer\n  }\n}\n```\nWhen `AbortSignal` fires, Node.js sends a TCP RST or closes the socket immediately, freeing system resources.\n\n3. **Chaining to Client Disconnects (`AbortSignal.any`):**\nIf a user closes their browser tab, your backend should immediately cancel ongoing database or downstream API queries:\n```javascript\napp.get('/slow-query', async (req, res) => {\n  const clientSignal = req.signal; // Automatically aborted on client disconnect\n  const timeoutSignal = AbortSignal.timeout(10000);\n  const combinedSignal = AbortSignal.any([clientSignal, timeoutSignal]);\n\n  const data = await queryDatabase({ signal: combinedSignal });\n  res.json(data);\n});\n```",
+    "pitfalls": "Using `Promise.race` for timeouts instead of `AbortSignal`. `Promise.race` leaves un-aborted HTTP sockets and DB queries running indefinitely.",
+    "key_takeaway": "Always pass `AbortSignal.timeout()` to `fetch()` and database drivers to terminate hung network sockets at the OS transport layer."
+  },
+  {
+    "id": "node-015",
+    "title": "Database Connection Management in Node.js: Idle Timeouts & Pool Leaks",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Node.js application uses the `pg` (node-postgres) driver. During normal operations, database queries take 5ms. Suddenly, all API requests stall with `Error: timeout exceeded when trying to connect`. Running `SELECT count(*) FROM pg_stat_activity` on PostgreSQL shows 10 connections all idle in transaction (`idle in transaction`).",
+    "question": "What is the classic connection leak pattern when using connection pools in Node.js, and how does the `try / finally` client release pattern prevent connection pool exhaustion?",
+    "hints": [
+      "When checking out a dedicated client with `pool.connect()`, it must be manually returned to the pool.",
+      "An unhandled error in a transaction leaves the connection checked out forever."
+    ],
+    "answer": "1. **The Classic Pool Leak Pattern:**\nWhen developers check out a dedicated client from the pool to execute a multi-step transaction:\n```javascript\n// BUGGY CODE\nconst client = await pool.connect();\nawait client.query('BEGIN');\nawait client.query('UPDATE accounts SET ...');\nthrow new Error('Something went wrong'); // Crashes before release!\nawait client.query('COMMIT');\nclient.release(); // NEVER CALLED!\n```\nBecause the error was thrown, `client.release()` is skipped. The client remains checked out from the pool and PostgreSQL marks it as `idle in transaction` holding table locks. After 10 errors, the pool's `max: 10` limit is exhausted, blocking all future queries.\n\n2. **The Bulletproof Fix (`try...finally`):**\n```javascript\nconst client = await pool.connect();\ntry {\n  await client.query('BEGIN');\n  await client.query('UPDATE accounts SET ...');\n  await client.query('COMMIT');\n} catch (err) {\n  await client.query('ROLLBACK');\n  throw err;\n} finally {\n  client.release(); // GUARANTEED to execute on success OR failure!\n}\n```\n\n3. **Pool Settings:** Configure `idleTimeoutMillis: 10000` and `connectionTimeoutMillis: 3000` to fail fast when pools saturate.",
+    "pitfalls": "Forgetting the `finally` block when using `pool.connect()`. A single error will leak a connection permanently until the Node process is killed.",
+    "key_takeaway": "Always release database connections inside a `finally` block (`client.release()`) to prevent connection pool exhaustion during unhandled errors."
+  },
+  {
+    "id": "node-016",
+    "title": "Child Processes: exec Buffer Overflows vs spawn Streams",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate",
+    "scenario": "A developer runs a shell command to generate report logs using `child_process.exec('find /var/log -type f', callback)`. In staging, the script runs fine. In production where logs number in the tens of thousands, the script crashes with `RangeError [ERR_CHILD_PROCESS_STDERR_MAXBUFFER]: stdout maxBuffer length exceeded`.",
+    "question": "What is the difference between `child_process.exec`, `execFile`, and `spawn`, why did `exec` crash with `maxBuffer`, and how does `spawn` stream gigabytes of output safely?",
+    "hints": [
+      "`exec` buffers all stdout/stderr in memory and invokes a system shell.",
+      "`spawn` returns streams (`stdout`, `stderr`) without memory buffering limits."
+    ],
+    "answer": "1. **Comparison of Child Process Methods:**\n- **`exec`:** Spawns a shell (`/bin/sh` or `cmd.exe`) and buffers the **entire output in a memory buffer**. Default `maxBuffer` is only **1MB** (1024 * 1024). If output exceeds 1MB, Node kills the child process with `ERR_CHILD_PROCESS_STDERR_MAXBUFFER`.\n- **`execFile`:** Same as `exec`, but executes the binary directly without spawning a system shell (immune to shell injection).\n- **`spawn`:** Streams output via standard Node streams (`child.stdout`, `child.stderr`). **Zero buffer limits**.\n\n2. **The Safe Streaming Solution (`spawn`):**\n```javascript\nimport { spawn } from 'node:child_process';\nimport readline from 'node:readline';\n\nconst child = spawn('find', ['/var/log', '-type', 'f']);\n\n// Stream lines one by one without memory buffering\nconst rl = readline.createInterface({ input: child.stdout });\nrl.on('line', (line) => {\n  processLog(line);\n});\n\nchild.stderr.on('data', (err) => console.error(err.toString()));\nchild.on('close', (code) => console.log(`Finished with code ${code}`));\n```",
+    "pitfalls": "Using `child_process.exec` with user-supplied arguments (`exec('cat ' + userInput)`). Spawning a shell enables command injection (`userInput = \"; rm -rf /\"`). Always use `execFile` or `spawn` with array arguments.",
+    "key_takeaway": "Never use `child_process.exec` for high-volume output; use `spawn` to stream data safely without `maxBuffer` memory limits or shell injection risks."
+  },
+  {
+    "id": "node-017",
+    "title": "Synchronous File System I/O on the Event Loop: fs vs fs.promises",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate",
+    "scenario": "An API endpoint reads a configuration file before responding: `const config = fs.readFileSync('/etc/app.json')`. Under heavy load (1,500 req/sec), all API endpoints experience severe latency spikes, and Prometheus reports the event loop lag jumping to 800ms.",
+    "question": "Why does calling synchronous methods like `fs.readFileSync()` freeze all concurrent user requests, how does `fs.promises` execute on the libuv thread pool, and when is synchronous I/O permissible?",
+    "hints": [
+      "Synchronous functions execute directly on the single JavaScript main thread.",
+      "Asynchronous `fs.promises` delegates disk I/O to background libuv worker threads."
+    ],
+    "answer": "1. **Main Thread Blocking:**\nNode.js executes JavaScript on a single thread. When `fs.readFileSync()` is called:\n- The JavaScript thread makes a synchronous blocking OS system call (`open`, `read`, `fstat`).\n- The CPU core suspends execution waiting for the physical disk or network storage to return data.\n- **During this time, the event loop cannot process a single network packet, timer, or concurrent HTTP request.** All 1,500 users are frozen.\n\n2. **Asynchronous I/O via Libuv (`fs.promises`):**\n```javascript\nimport fs from 'node:fs/promises';\n\n// Non-blocking: delegates reading to a background libuv worker thread\nconst config = await fs.readFile('/etc/app.json', 'utf8');\n```\nWhile the libuv thread waits for the disk, the main JavaScript thread continues processing thousands of other incoming network requests.\n\n3. **When is Sync I/O Permissible?**\nStrictly during **initialization and bootstrapping** before the HTTP server begins listening (`server.listen()`). Once the server is accepting traffic, never invoke synchronous methods.",
+    "pitfalls": "Calling `fs.existsSync()` or `fs.statSync()` inside request handler middleware. Even small metadata checks freeze the main thread under high concurrency.",
+    "key_takeaway": "Never call `fs.*Sync` methods inside active request paths; use `node:fs/promises` to delegate disk operations to background libuv threads."
+  },
+  {
+    "id": "node-018",
+    "title": "Cryptographic CPU Freezes: crypto.pbkdf2Sync vs Worker Thread Offload",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A user authentication service authenticates passwords using `crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512')`. When 10 users log in at the same second, all other API requests completely freeze for 1.5 seconds.",
+    "question": "Why does `pbkdf2Sync` block the entire event loop, what is the difference between asynchronous `crypto.pbkdf2` and worker threads, and how do you prevent CPU-heavy cryptography from starving API throughput?",
+    "hints": [
+      "`pbkdf2Sync` runs on the main thread; asynchronous `pbkdf2` runs in libuv's thread pool.",
+      "If the libuv thread pool has only 4 threads, 4 crypto calls will saturate it."
+    ],
+    "answer": "1. **Root Cause:**\nPassword hashing algorithms (PBKDF2, bcrypt, Argon2) are intentionally designed to be computationally expensive (e.g. 100,000 hash iterations) to prevent brute-force attacks. Running `pbkdf2Sync` executes these 100,000 iterations **directly on the main JavaScript thread**, freezing the event loop for 150ms per call.\n\n2. **Asynchronous `crypto.pbkdf2`:**\n```javascript\nimport crypto from 'node:crypto';\nimport { promisify } from 'node:util';\nconst pbkdf2 = promisify(crypto.pbkdf2);\n\n// Runs on libuv worker thread, NOT the main event loop thread!\nconst key = await pbkdf2(password, salt, 100000, 64, 'sha512');\n```\n\n3. **Scaling Beyond Libuv:**\nBecause the default libuv thread pool is only 4 threads, 4 concurrent logins will saturate libuv and block DNS queries. Solutions:\n- Increase `UV_THREADPOOL_SIZE=32`.\n- Offload hashing to dedicated worker threads (`node:worker_threads`) or a dedicated authentication microservice.",
+    "pitfalls": "Using synchronous bcrypt (`bcrypt.hashSync`) in web request handlers. It is one of the most common causes of multi-second latency spikes in Node.js backends.",
+    "key_takeaway": "Never use synchronous crypto (`pbkdf2Sync`, `bcrypt.hashSync`). Use asynchronous APIs or dedicated worker threads to keep the main event loop responsive."
+  },
+  {
+    "id": "node-019",
+    "title": "Native Node-API (N-API) Addons vs WebAssembly (Wasm) in Node.js",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "An audio processing company needs to run a high-performance C++ audio DSP algorithm inside their Node.js backend. The team debates between compiling the C++ code to a native Node-API (N-API) C++ addon or compiling it to WebAssembly (Wasm).",
+    "question": "What are the performance, security, and portability trade-offs between Node-API native C++ addons and WebAssembly (Wasm) inside Node.js?",
+    "hints": [
+      "Node-API provides raw native CPU speed but can segfault the entire Node process.",
+      "WebAssembly runs in a memory-safe sandbox and is cross-platform portable."
+    ],
+    "answer": "1. **Node-API (N-API) Native Addons:**\n- **Performance:** Direct native machine execution at full C/C++ or Rust speed. Direct access to raw OS hardware, SIMD, and multi-threading.\n- **Security & Stability Risk:** Runs with full process privileges. A single null pointer dereference or memory corruption in C++ **segfaults and terminates the entire Node.js process**. Memory leaks in native code bypass V8 GC.\n- **Portability:** Requires compilation for every target OS and architecture (glibc vs musl, x86 vs arm64) during `npm install`.\n\n2. **WebAssembly (Wasm):**\n- **Performance:** Runs at near-native speed (~1.2x to 1.5x native).\n- **Security & Stability:** Runs inside V8's **memory-safe sandbox**. A crash or out-of-bounds memory read in Wasm throws a standard catchable JavaScript error; it **never segfaults the Node process**.\n- **Portability:** Write once, run anywhere. A single `.wasm` binary runs identically on Linux x86, Mac ARM64, Windows, and even in web browsers.\n\n3. **Rule of Thumb:** Use Wasm for portable, sandboxed computation; use Node-API only when raw hardware acceleration or OS system calls are required.",
+    "pitfalls": "Shipping native C++ addons that fail to build on customer servers due to missing Python, make, or gcc build tools. Wasm requires zero host compiler tools.",
+    "key_takeaway": "Prefer WebAssembly for portable, memory-safe near-native speed; reserve Node-API addons for low-level OS bindings and maximum hardware acceleration."
+  },
+  {
+    "id": "node-020",
+    "title": "Production Zero-Downtime Reloads: PM2 Cluster vs Kubernetes Rolling Update",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate",
+    "scenario": "A company deploys Node.js using PM2 in cluster mode (`pm2 reload all`). During deployments, users occasionally experience dropped connections. Later, the company migrates to Kubernetes and wonders if they should still run PM2 inside Docker containers.",
+    "question": "Why is running PM2 inside a Docker container on Kubernetes an anti-pattern, how does PM2's cluster reload work, and how does Kubernetes native rolling deployment achieve zero downtime?",
+    "hints": [
+      "Containers should adhere to the single-responsibility principle: 1 container = 1 process (PID 1).",
+      "Kubernetes handles process crashes, health checking, and traffic draining natively."
+    ],
+    "answer": "1. **Why PM2 in Kubernetes is an Anti-Pattern:**\nPM2 was designed as a process supervisor for bare-metal VMs. Inside Kubernetes:\n- **PID 1 Conflict:** PM2 becomes PID 1. When Kubernetes sends `SIGTERM`, PM2 often fails to propagate the signal cleanly to child workers within the grace period.\n- **Redundant Supervision:** Kubernetes already monitors pod health, auto-restarts failed containers, manages resource limits, and collects logs. Running PM2 adds unnecessary memory bloat and hides container crash states from Kubernetes.\n\n2. **Kubernetes Native Zero-Downtime Deployment:**\n1. Kubelet starts the new Pod.\n2. When the Pod passes its `readinessProbe`, Kubernetes adds its IP to the Service endpoints.\n3. Kubernetes sends `SIGTERM` to the old Pod.\n4. Old Pod handles `process.on('SIGTERM')`, closes the server (`server.close()`), waits for in-flight requests to complete, and exits.\n5. Traffic shifts seamlessly with zero dropped connections.\n\n3. **When PM2 is Appropriate:**\nPM2 is great for small single-VM deployments (EC2, DigitalOcean droplets) without Kubernetes.",
+    "pitfalls": "Using `npm start` as the container `CMD`. `npm` does not forward OS signals (`SIGTERM`) to the underlying node process, resulting in abrupt `SIGKILL` termination after 30 seconds.",
+    "key_takeaway": "Run Node.js directly (`node server.js`) in Docker containers on Kubernetes; let Kubernetes manage process lifecycles and rolling updates without PM2."
   }
 ]
