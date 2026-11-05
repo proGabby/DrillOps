@@ -1,4 +1,4 @@
-# 🧠 DrillOps: Production Engineering & Systems Challenge Pipeline
+# DrillOps: Production Engineering & Systems Challenge Pipeline
 
 An automated 2-phase daily technical challenge pipeline and interactive 2-way AI mentor designed to sharpen production engineering instincts and prepare engineers for Senior & Staff DevOps, SRE, and Distributed Systems roles. 
 
@@ -6,7 +6,7 @@ Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morn
 
 ---
 
-## 🚀 Key Highlights
+## Key Highlights
 
 * **140 Curated Scenarios**: 20 deep-dive production engineering challenges across 7 core domains, cycling automatically with state tracking to guarantee zero duplicates until the full bank is exhausted.
 * **2-Phase Spaced Repetition**: Morning incident scenario (08:00 UTC) gives you the day to think and architect; Evening post-mortem (18:00 UTC) reveals the full root-cause analysis, pitfalls, and Staff Engineer takeaways.
@@ -16,7 +16,7 @@ Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morn
 
 ---
 
-## 📅 Weekly Domain Rotation
+## Weekly Domain Rotation
 
 | Day of Week | Track | Focus & Core Concepts |
 | :--- | :--- | :--- |
@@ -30,12 +30,12 @@ Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morn
 
 ---
 
-## ⚙️ How the 2-Phase Delivery Works
+## How the 2-Phase Delivery Works
 
 ```
            08:00 UTC (Morning)                   18:00 UTC (Evening)
 ┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
-│  🧠 DRILLOPS: MORNING CHALLENGE      │     │  ✅ DRILLOPS: EVENING DEEP DIVE      │
+│  DRILLOPS: MORNING CHALLENGE         │     │  DRILLOPS: EVENING DEEP DIVE         │
 │  - Real-world production scenario    │ ──> │  - Root-cause breakdown              │
 │  - Architectural challenge question  │     │  - Code fix & preventative pattern   │
 │  - 2 Progressive hints (No spoilers) │     │  - Common interview pitfalls         │
@@ -44,7 +44,7 @@ Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morn
                    │
                    ▼ (Anytime during the day)
 ┌────────────────────────────────────────────────────────┐
-│  🤖 2-Way Telegram AI Mentor (Gemini)                  │
+│  2-Way Telegram AI Mentor (Gemini)                     │
 │  - /hint      -> Socratic guidance without spoilers    │
 │  - /solution  -> Early post-mortem walkthrough         │
 │  - Reply code -> Instant AI architectural review       │
@@ -61,7 +61,7 @@ Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morn
 
 ---
 
-## 🤖 Interactive 2-Way AI Mentor (Telegram)
+## Interactive 2-Way AI Mentor (Telegram)
 
 DrillOps features a built-in interactive bot powered by Google Gemini 2.5 Flash:
 
@@ -77,7 +77,7 @@ npm run bot
 
 ---
 
-## 🛠️ Quick Setup Guide
+## Quick Setup Guide
 
 ### Option 1: Telegram Setup (Recommended — 100% Free, Instant, No Timeouts)
 
@@ -109,7 +109,7 @@ To enable AI enrichment and the 2-way Telegram mentor:
 
 ---
 
-## 🚢 Deploying with GitHub Actions (Automated Daily Drills)
+## Deploying with GitHub Actions (Automated Daily Drills)
 
 ### Step 1: Push This Repository to GitHub
 
@@ -150,7 +150,7 @@ git push -u origin main
 
 ---
 
-## 🌐 Hosting the 2-Way Interactive Bot (24/7)
+## Hosting the 2-Way Interactive Bot (24/7)
 
 * **Daily Scheduled Drills**: Run 100% free with zero infrastructure via **GitHub Actions** (08:00 and 18:00 UTC).
 * **24/7 Interactive AI Mentor**: The interactive Telegram listener (`npm run bot`) can run locally or on any free/low-cost container service:
@@ -160,7 +160,7 @@ git push -u origin main
 
 ---
 
-## 💻 Local Testing & CLI Commands
+## Local Testing & CLI Commands
 
 You can run the engine directly from your terminal:
 
@@ -182,7 +182,7 @@ npm run bot
 
 ---
 
-## 📂 Project Architecture
+## Project Architecture
 
 ```
 drillops/
@@ -217,7 +217,7 @@ drillops/
 
 ---
 
-## ✍️ Adding Custom Questions
+## Adding Custom Questions
 
 To add custom scenarios, edit any file in `data/questions/<domain>.json` following this schema:
 
@@ -243,6 +243,6 @@ The pipeline automatically detects new questions and incorporates them into the 
 
 ---
 
-## 📜 License
+## License
 
 MIT License. Feel free to fork, customize, and level up your engineering team!
