@@ -210,9 +210,69 @@ import { CONFIG } from './config.js';
     try {
       const response = await fetch(url, { method: 'GET' });
       const data = await response.json();
-      return data.ok ? data.result : [];
+      if (!data.ok) {
+        throw new Error(data.description || 'Failed to fetch updates');
+      }
+      return data.result || [];
     } catch (err) {
-      console.warn(`[Telegram Poll Warning] ${err.message}`);
-      return [];
+      throw err;
     }
+  }
+
+  /**
+   * Register a webhook URL with Telegram
+   */
+  export async function setWebhook(webhookUrl) {
+    const { botToken } = CONFIG.telegram;
+    if (!botToken) throw new Error('TELEGRAM_BOT_TOKEN is missing.');
+
+    const url = `https://api.telegram.org/bot${botToken}/setWebhook`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: webhookUrl,
+        allowed_updates: ['message']
+      })
+    });
+
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error(`Failed to set Telegram webhook: ${data.description}`);
+    }
+    return data;
+  }
+
+  /**
+   * Retrieve current webhook status and diagnosis from Telegram
+   */
+  export async function getWebhookInfo() {
+    const { botToken } = CONFIG.telegram;
+    if (!botToken) throw new Error('TELEGRAM_BOT_TOKEN is missing.');
+
+    const url = `https://api.telegram.org/bot${botToken}/getWebhookInfo`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!data.ok) {
+      throw new Error(`Failed to get webhook info: ${data.description}`);
+    }
+    return data.result;
+  }
+
+  /**
+   * Delete active webhook (switches bot back to polling mode)
+   */
+  export async function deleteWebhook() {
+    const { botToken } = CONFIG.telegram;
+    if (!botToken) throw new Error('TELEGRAM_BOT_TOKEN is missing.');
+
+    const url = `https://api.telegram.org/bot${botToken}/deleteWebhook`;
+    const response = await fetch(url, { method: 'POST' });
+    const data = await response.json();
+
+    if (!data.ok) {
+      throw new Error(`Failed to delete webhook: ${data.description}`);
+    }
+    return data;
   }

@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
+import path from 'node:path';
+import url from 'node:url';
 import { CONFIG } from './config.js';
 import { getBotInfo, getUpdates, sendTelegramReply, sendChatAction } from './telegram.js';
 import { askAIAssistant } from './ai.js';
 import { buildMorningChallenge, buildEveningSolution } from './engine.js';
 
-function readActiveDrill() {
+export function readActiveDrill() {
   try {
     if (fs.existsSync(CONFIG.paths.activeDrillFile)) {
       const content = fs.readFileSync(CONFIG.paths.activeDrillFile, 'utf8');
@@ -15,10 +17,20 @@ function readActiveDrill() {
   } catch (err) {
     // Ignore read errors
   }
+
+  // Fallback to /tmp in serverless environments
+  try {
+    const tmpPath = path.join('/tmp', path.basename(CONFIG.paths.activeDrillFile));
+    if (fs.existsSync(tmpPath)) {
+      const content = fs.readFileSync(tmpPath, 'utf8');
+      return JSON.parse(content);
+    }
+  } catch (_) {}
+
   return null;
 }
 
-function getWelcomeMessage(firstName = 'Engineer') {
+export function getWelcomeMessage(firstName = 'Engineer') {
   return `👋 *Hello, ${firstName}!*
 
 I am your personal *DrillOps AI Engineering Mentor* powered by Google Gemini.
@@ -35,7 +47,7 @@ I am your personal *DrillOps AI Engineering Mentor* powered by Google Gemini.
 _What technical problem are we tackling today?_`;
 }
 
-async function handleMessage(msg) {
+export async function handleMessage(msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
   const userFirst = msg.from?.first_name || 'Engineer';
@@ -155,11 +167,21 @@ async function startBot() {
         }
       }
     } catch (err) {
+      if (err.message && err.message.includes('webhook is active')) {
+        console.error('\n⚠️  A Telegram webhook is currently active for this bot.');
+        console.error('To run the bot locally via polling, first delete the active webhook:');
+        console.error('   npm run webhook:delete\n');
+        process.exit(1);
+      }
       console.warn(`[Bot Loop Error] ${err.message}`);
       await new Promise(r => setTimeout(r, 2000));
     }
   }
 }
 
-startBot();
+// Only start the polling listener when executed directly from CLI (e.g., node src/bot.js)
+const isDirectRun = Boolean(process.argv[1] && import.meta.url === url.pathToFileURL(process.argv[1]).href);
+if (isDirectRun) {
+  startBot();
+}
 

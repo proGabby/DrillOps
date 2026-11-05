@@ -153,10 +153,29 @@ git push -u origin main
 ## Hosting the 2-Way Interactive Bot (24/7)
 
 * **Daily Scheduled Drills**: Run 100% free with zero infrastructure via **GitHub Actions** (08:00 and 18:00 UTC).
-* **24/7 Interactive AI Mentor**: The interactive Telegram listener (`npm run bot`) can run locally or on any free/low-cost container service:
-  - **Local/Screen/Tmux**: `npm run bot`
-  - **Render / Railway / Fly.io**: Create a Background Worker or Web Service pointing to `npm run bot`.
-  - **VPS (Systemd)**: Run as a lightweight background daemon (`systemctl start drillops-bot`).
+* **24/7 Interactive AI Mentor (Vercel Serverless Webhook - Recommended)**:
+  Instead of keeping a laptop or server running 24/7, deploy the built-in serverless webhook to Vercel:
+  1. Push this repository to your GitHub.
+  2. Go to [vercel.com](https://vercel.com) and click **Add New...** -> **Project**.
+  3. Import your `DrillOps` repository.
+  4. In the Vercel **Environment Variables** settings, add:
+     * `TELEGRAM_BOT_TOKEN`
+     * `TELEGRAM_CHAT_ID`
+     * `GEMINI_API_KEY`
+  5. Click **Deploy**. Vercel will give you a domain (e.g., `https://drillops.vercel.app`).
+  6. Register your webhook by running this command locally:
+     ```bash
+     npm run webhook:set https://<YOUR-VERCEL-DOMAIN>.vercel.app
+     ```
+  7. Test your webhook anytime with:
+     ```bash
+     npm run webhook:info
+     ```
+     To switch back to local development polling:
+     ```bash
+     npm run webhook:delete
+     ```
+* **Local Development Polling**: Run `npm run bot` on your machine whenever you want to test locally.
 
 ---
 
@@ -176,8 +195,13 @@ node src/index.js --phase morning --topic golang --dry-run
 node src/index.js --phase morning --topic architecture --dry-run
 node src/index.js --phase morning --topic incident --dry-run
 
-# Run the 2-way AI Telegram Bot listener
+# Run the 2-way AI Telegram Bot listener locally (polling mode)
 npm run bot
+
+# Webhook management commands
+npm run webhook:set https://<YOUR-VERCEL-DOMAIN>.vercel.app
+npm run webhook:info
+npm run webhook:delete
 ```
 
 ---
@@ -189,6 +213,8 @@ drillops/
 ├── .github/
 │   └── workflows/
 │       └── daily-drill.yml       # GitHub Actions cron schedules (08:00 & 18:00 UTC)
+├── api/
+│   └── webhook.js                # Vercel serverless function for Telegram 24/7 AI mentor
 ├── data/
 │   ├── questions/                # 140 Curated production scenarios (20 per domain)
 │   │   ├── devops.json
@@ -209,9 +235,11 @@ drillops/
 │   ├── telegram.js               # Telegram Bot API client & HTML message formatter
 │   ├── whatsapp.js               # CallMeBot & Twilio WhatsApp client
 │   ├── bot.js                    # Interactive 2-way Telegram AI mentor listener
+│   ├── webhook.js                # CLI utility to register & inspect Telegram webhooks
 │   └── index.js                  # CLI pipeline entrypoint
 ├── .env.example                  # Environment configuration template
 ├── package.json
+├── vercel.json                   # Vercel serverless deployment configuration
 └── README.md
 ```
 

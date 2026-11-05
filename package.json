@@ -7,6 +7,9 @@
   "scripts": {
     "start": "node src/index.js",
     "bot": "node src/bot.js",
+    "webhook:set": "node src/webhook.js set",
+    "webhook:info": "node src/webhook.js info",
+    "webhook:delete": "node src/webhook.js delete",
     "drill:morning": "node src/index.js --phase morning",
     "drill:evening": "node src/index.js --phase evening",
     "drill:test": "node src/index.js --phase morning --dry-run"

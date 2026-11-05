@@ -15,26 +15,45 @@ export const TOPIC_SCHEDULE = {
 };
 
 /**
- * Read JSON file safely
+ * Read JSON file safely with serverless fallback
  */
 function readJson(filePath, defaultValue = null) {
   try {
-    if (!fs.existsSync(filePath)) return defaultValue;
-    const content = fs.readFileSync(filePath, 'utf8');
-    return JSON.parse(content);
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf8');
+      return JSON.parse(content);
+    }
   } catch (err) {
-    console.warn(`Error reading ${filePath}:`, err.message);
-    return defaultValue;
+    // Proceed to fallback
   }
+
+  // Fallback to /tmp in serverless environments (e.g. Vercel)
+  try {
+    const tmpPath = path.join('/tmp', path.basename(filePath));
+    if (fs.existsSync(tmpPath)) {
+      const content = fs.readFileSync(tmpPath, 'utf8');
+      return JSON.parse(content);
+    }
+  } catch (_) {}
+
+  return defaultValue;
 }
 
 /**
- * Write JSON file safely
+ * Write JSON file safely with serverless fallback
  */
 function writeJson(filePath, data) {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    // In read-only serverless environments like Vercel, write to /tmp
+    try {
+      const tmpPath = path.join('/tmp', path.basename(filePath));
+      fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+    } catch (_) {}
+  }
 }
 
 /**
