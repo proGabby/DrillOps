@@ -1,0 +1,47 @@
+[
+  {
+    "id": "tool-001",
+    "title": "Prometheus: rate() vs irate() and Histogram Quantile Pitfalls",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "Your team builds a Grafana dashboard for API latency. An engineer calculates p99 latency using `histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[1m]))`. When traffic drops to 2 requests per minute at night, the Grafana panel shows wild latency spikes of 15 seconds, but individual access logs show every single request took less than 30ms.",
+    "question": "How does `histogram_quantile()` interpolate percentile estimates from bucket boundaries, why does low-traffic sample starvation produce fake latency spikes, and what is the key operational rule for choosing the range window in `rate()` relative to the scrape interval?",
+    "hints": [
+      "`histogram_quantile` assumes a linear distribution within the bucket containing the target percentile.",
+      "The range window in `rate()` should be at least 4x the scrape interval."
+    ],
+    "answer": "1. **How `histogram_quantile` Calculates Percentiles:**\nPrometheus does not store raw request durations; it counts requests falling into pre-configured bucket boundaries (e.g. `le=\"0.05\"`, `le=\"0.1\"`, `le=\"0.5\"`, `le=\"+Inf\"`). `histogram_quantile()` locates the bucket holding the 99th percentile and applies **linear interpolation** between the lower and upper bounds of that bucket.\n\n2. **Why Low Traffic Causes Fake Spikes:**\nIf only 1 or 2 requests occur in the window and one of them lands in a large upper bucket (e.g., between `le=\"0.5\"` and `le=\"10\"`), linear interpolation assumes uniform distribution across that entire broad bucket range, artificially reporting an inflated high latency value like 8.5s.\n\n3. **Operational Rules:**\n- **Window Rule:** The range window for `rate()` should be at least **4x the scrape interval** (e.g. for a 15s scrape interval, use at least `[1m]`, preferably `[2m]` or `[5m]`) to handle dropped scrapes and counter resets safely.\n- **`rate()` vs `irate()`:** Use `rate()` for alerting and recording rules (smooth average over window). Use `irate()` (instant rate based on the last two data points) only for volatile debugging graphs with high scrape frequency.",
+    "pitfalls": "Using `irate()` inside `histogram_quantile()`. Because `irate()` moves rapidly and unpredictably, it breaks histogram bucket consistency.",
+    "key_takeaway": "Histogram quantiles are statistical approximations via linear bucket interpolation. Avoid wide buckets and pair with adequate scrape window sizes."
+  },
+  {
+    "id": "tool-002",
+    "title": "OpenTelemetry W3C Trace Context Propagation Across Async Workers",
+    "domain": "Tools & Observability",
+    "difficulty": "Advanced",
+    "scenario": "A Node.js API receives an HTTP checkout request and publishes an event to Apache Kafka or RabbitMQ. A background Go worker consumes the event and updates the inventory database. In your Jaeger / Grafana Tempo UI, the Go worker's trace shows up as an independent root trace rather than a child of the original HTTP checkout request.",
+    "question": "What is the standard W3C `traceparent` header structure, how must context propagation be injected into message broker headers and extracted by the consumer worker, and what is the difference between a child span and a span link in asynchronous decoupled processing?",
+    "hints": [
+      "`traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`",
+      "Look into OpenTelemetry propagators (`TextMapPropagator`)."
+    ],
+    "answer": "1. **W3C `traceparent` Header Format:**\nStructure: `version-trace_id-parent_id-trace_flags`\nExample: `00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`\n- `00`: Current W3C specification version.\n- `4bf92...`: 16-byte global Trace ID (identifies the entire transaction).\n- `00f06...`: 8-byte Span ID of the caller.\n- `01`: Trace flags (sampled bit: 1 = trace was sampled and recorded).\n\n2. **Broker Propagation Implementation:**\n- **Producer (Node.js):** Use `propagation.inject(context.active(), message.headers)` before publishing to the queue.\n- **Consumer (Go):** Use `otel.GetTextMapPropagator().Extract(context.Background(), propagation.HeaderCarrier(msg.Headers))` to extract the remote span context into the Go `context.Context`.\n\n3. **Child Span vs Span Link:**\n- **Child Span (`Parent`):** Use when the downstream execution is synchronous or direct sub-task.\n- **Span Link (`Link`):** In batch processing (where one consumer job processes 50 messages from 50 different users at once), a span cannot have 50 parents. Instead, create a new batch span and attach **Links** to the 50 individual `traceparent` contexts.",
+    "pitfalls": "Creating a new unlinked trace ID in async message consumers, which shatters end-to-end distributed observability during production incident investigations.",
+    "key_takeaway": "Always inject and extract W3C `traceparent` headers through message brokers using OpenTelemetry TextMapPropagators."
+  },
+  {
+    "id": "tool-003",
+    "title": "Linux Kernel Diagnostics: strace, ss, and tcpdump Under Load",
+    "domain": "Tools & Observability",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A production backend binary is consuming 100% of a CPU core while doing almost zero network throughput. Standard logs show nothing. You SSH into the Linux host to diagnose the process without installing heavy profiling agents.",
+    "question": "What sequence of Linux CLI tools (`top`, `strace`, `ss`, `/proc`) allows you to immediately tell if the process is stuck in user-space computation (e.g. infinite loop), trapped in kernel system call thrashing (e.g. polling), or socket buffer starvation?",
+    "hints": [
+      "Check `%usr` vs `%sys` in `top` / `pidstat`.",
+      "`strace -c -p <pid>` provides system call summary statistics."
+    ],
+    "answer": "1. **Step 1: Check `%usr` vs `%sys` (top / pidstat):**\nRun `top -p <pid>` or `pidstat -u 1 5`:\n- If **%usr is ~100% and %sys is ~0%**: The process is spinning in pure user-space code (infinite loop, CPU-heavy parsing, regex backtrack, or busy-wait). It is **not** making system calls.\n- If **%sys is high (>50%)**: The process is spending its time in the Linux kernel (excessive context switching, system call thrashing, memory paging).\n\n2. **Step 2: Inspect System Calls (strace):**\n- If %sys is high: Run `strace -c -p <PID>` for 5 seconds. It outputs a summary table showing which syscalls (e.g. `futex`, `epoll_wait`, `read`) are being invoked millions of times and where execution time is spent.\n- Run `strace -t -e trace=network -p <PID>` to see live socket calls.\n\n3. **Step 3: Socket Buffer Inspection (ss):**\nRun `ss -tulpn` or `ss -tmi 'sport = :8080'` to inspect `Recv-Q` and `Send-Q`:\n- High `Recv-Q`: Kernel received packets, but the application is not calling `read()`/`accept()` fast enough.\n- High `Send-Q`: Application wrote data, but socket buffers are full waiting for TCP ACKs from a slow client.",
+    "pitfalls": "Running unconditional `strace -p <PID>` on a high-throughput production binary without `-c` or filters. `strace` hooks `ptrace` on every syscall, which can degrade performance by 10x-50x and crash production traffic.",
+    "key_takeaway": "Check `%usr` vs `%sys` first to determine whether your bottleneck is user-space logic or kernel syscall overhead before running diagnostic tools."
+  }
+]
