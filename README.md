@@ -1,148 +1,196 @@
-# 🧠 Daily Tech Drill (DevOps, Go, Node.js, SRE, Tools)
+# 🧠 DrillOps: Production Engineering & Systems Challenge Pipeline
 
-An automated 2-phase daily technical challenge pipeline designed to sharpen production engineering instincts and prepare for senior backend / DevOps / SRE interviews. Delivered straight to your WhatsApp every morning and evening via GitHub Actions.
+An automated 2-phase daily technical challenge pipeline and interactive 2-way AI mentor designed to sharpen production engineering instincts and prepare engineers for Senior & Staff DevOps, SRE, and Distributed Systems roles. 
+
+Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morning and evening via **GitHub Actions**, backed by a curated bank of **140 production scenarios** and an interactive **Google Gemini AI mentor** for progressive hints, architectural evaluations, and live code reviews.
 
 ---
 
-## 🎯 Weekly Topic Rotation
+## 🚀 Key Highlights
+
+* **140 Curated Scenarios**: 20 deep-dive production engineering challenges across 7 core domains, cycling automatically with state tracking to guarantee zero duplicates until the full bank is exhausted.
+* **2-Phase Spaced Repetition**: Morning incident scenario (08:00 UTC) gives you the day to think and architect; Evening post-mortem (18:00 UTC) reveals the full root-cause analysis, pitfalls, and Staff Engineer takeaways.
+* **Interactive 2-Way AI Mentor (Telegram)**: Chat directly with your bot throughout the day. Ask for progressive Socratic hints (`/hint`), reveal the solution early (`/solution`), or paste your code snippet/architecture design for an instant SRE review.
+* **Zero Runtime Dependencies**: Built entirely with native Node.js ESM and built-in `fetch`. No bulky node_modules or third-party runtime dependencies.
+* **100% Free to Run**: Hosted entirely on GitHub Actions cron schedules with free Telegram Bot and Google Gemini API tiers.
+
+---
+
+## 📅 Weekly Domain Rotation
 
 | Day of Week | Track | Focus & Core Concepts |
 | :--- | :--- | :--- |
 | **Monday** | **DevOps & Containers** | Docker multi-stage builds, rootless containers, K8s CrashLoopBackOff & OOMKilled triage, Helm, GitOps with ArgoCD. |
 | **Tuesday** | **Backend with Go** | Goroutine leaks, unbuffered channels, memory escape analysis, GC pressure, `sync.Pool`, race conditions, `pprof`. |
-| **Wednesday** | **Node.js Backend & Libuv** | Event loop phases, microtask starvation (`process.nextTick`), libuv thread pool exhaustion, streams backpressure, memory leaks. |
+| **Wednesday** | **Node.js Backend & Libuv** | Event loop phases, microtask starvation (`process.nextTick`), libuv thread pool exhaustion, stream backpressure, memory leaks. |
 | **Thursday** | **SRE & SLOs** | Multi-window multi-burn-rate alerts, cascading failures, cache stampede (Thundering Herd), circuit breakers, load shedding. |
-| **Friday** | **Tools & Observability** | Prometheus (rate vs irate, histogram quantiles), OpenTelemetry W3C trace propagation, Terraform state locking, Linux diagnostics (`strace`, `ss`). |
-| **Saturday** | **Distributed Architecture** | Idempotency key design, database connection pool starvation, Saga patterns, caching strategies. |
-| **Sunday** | **Production War Stories** | Real-world incident triage, post-deployment 504 timeouts, Redis single-thread blocking (`KEYS *`). |
+| **Friday** | **Tools & Observability** | Prometheus (`rate` vs `irate`, histogram quantiles), OpenTelemetry W3C trace propagation, Terraform state locking, Linux diagnostics (`strace`, `ss`). |
+| **Saturday** | **Distributed Architecture** | Idempotency key design, database connection pool starvation, Saga patterns, cache-aside vs write-through strategies. |
+| **Sunday** | **Production War Stories** | Real-world incident triage, post-deployment 504 gateway timeouts, Redis single-thread blocking (`KEYS *`), database lock contention. |
 
 ---
 
-## ⏰ How the 2-Phase Delivery Works
+## ⚙️ How the 2-Phase Delivery Works
 
-1. **Phase 1 (Morning — 08:00 UTC): The Challenge**
-   - Sends a realistic production scenario, technical challenge, and 2 hints to your WhatsApp.
-   - **No solution is revealed yet.** You spend the day thinking about the architecture, edge cases, and code fix.
-2. **Phase 2 (Evening — 18:00 UTC): The Deep Dive & Post-Mortem**
-   - Delivers the comprehensive architectural answer, common pitfalls, and a core rule-of-thumb takeaway.
-   - If `GEMINI_API_KEY` is provided, includes a Staff Engineer pro-tip.
-   - Automatically records the drill in `data/state/history.json` so you never receive duplicate questions until the bank cycles.
-
----
-
-## 🚀 Quick Setup Guide
-
-### Step 1: Get Your Free WhatsApp API Key (CallMeBot)
-
-CallMeBot is a free, reliable gateway to send personal WhatsApp messages without 72-hour sandbox timeouts:
-
-1. Add the active CallMeBot phone number **`+34 644 95 42 75`** (or **`+34 623 78 64 49`** / **`+34 644 26 33 77`**) to your phone contacts as *CallMeBot*. (Check [callmebot.com](https://www.callmebot.com/blog/free-api-whatsapp-messages/) if you ever need the latest active number).
-2. Open WhatsApp and send the following message to that contact:
-   ```text
-   I allow callmebot to send me messages
-   ```
-3. CallMeBot will reply within a few seconds with:
-   ```text
-   API Key Created! Your API Key is: 123456
-   ```
-4. Note down:
-   - Your phone number in international format without `+` or spaces (e.g. `2348012345678` for Nigeria, `14155552671` for US).
-   - Your API key (e.g. `123456`).
-
----
-
-### Step 2: Push This Project to a New GitHub Repository
-
-From your terminal:
-
-```bash
-cd /Users/macbookpro/Documents/inimfon/daily-tech-drill
-
-# Initialize git repository
-git init
-git add .
-git commit -m "feat: initial daily tech drill pipeline"
-
-# Create a new private or public repository on GitHub (e.g., daily-tech-drill)
-git remote add origin https://github.com/<YOUR_GITHUB_USERNAME>/daily-tech-drill.git
-git branch -M main
-git push -u origin main
+```
+           08:00 UTC (Morning)                   18:00 UTC (Evening)
+┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
+│  🧠 DRILLOPS: MORNING CHALLENGE      │     │  ✅ DRILLOPS: EVENING DEEP DIVE      │
+│  - Real-world production scenario    │ ──> │  - Root-cause breakdown              │
+│  - Architectural challenge question  │     │  - Code fix & preventative pattern   │
+│  - 2 Progressive hints (No spoilers) │     │  - Common interview pitfalls         │
+│  - Ponder architecture during the day│     │  - Staff Engineer rule-of-thumb      │
+└──────────────────────────────────────┘     └──────────────────────────────────────┘
+                   │
+                   ▼ (Anytime during the day)
+┌────────────────────────────────────────────────────────┐
+│  🤖 2-Way Telegram AI Mentor (Gemini)                  │
+│  - /hint      -> Socratic guidance without spoilers    │
+│  - /solution  -> Early post-mortem walkthrough         │
+│  - Reply code -> Instant AI architectural review       │
+└────────────────────────────────────────────────────────┘
 ```
 
----
-
-### Step 3: Configure GitHub Secrets
-
-1. In your GitHub repository, navigate to **Settings** → **Secrets and variables** → **Actions**.
-2. Click **New repository secret** and add the following:
-
-| Secret Name | Description | Example |
-| :--- | :--- | :--- |
-| `WHATSAPP_PROVIDER` | WhatsApp service to use | `callmebot` |
-| `CALLMEBOT_PHONE` | Your international phone number | `2348012345678` |
-| `CALLMEBOT_API_KEY` | The API key CallMeBot sent you | `123456` |
-| `GEMINI_API_KEY` *(Optional)* | Google AI Studio free API key for AI enrichment | `AIzaSy...` |
-
-*(Optional Gemini API key: Get a free key at [Google AI Studio](https://aistudio.google.com/app/apikey) to enable simulated incident alerts and Staff Engineer takeaways).*
-
----
-
-### Step 4: Test It Immediately on GitHub Actions
-
-1. Go to the **Actions** tab in your repository.
-2. Under **All workflows**, select **Daily Tech Drill Pipeline**.
-3. Click **Run workflow**:
-   - Choose `phase: morning`.
-   - Leave `dry_run: false`.
-4. Check your WhatsApp — you should receive your morning challenge in seconds!
+1. **Phase 1 (Morning — 08:00 UTC): The Challenge**
+   - Sends a realistic production scenario, technical challenge question, and 2 hints to your Telegram or WhatsApp.
+   - **No solution is revealed yet.** You spend the day reasoning through edge cases, bottlenecks, and failure modes.
+2. **Phase 2 (Evening — 18:00 UTC): The Deep Dive & Post-Mortem**
+   - Delivers the comprehensive architectural answer, common pitfalls, and a core rule-of-thumb takeaway.
+   - Includes a Staff Engineer pro-tip generated by Google Gemini.
+   - Automatically records the drill in `data/state/history.json` so you never receive duplicate questions until the bank cycles.
 
 ---
 
 ## 🤖 Interactive 2-Way AI Mentor (Telegram)
 
-You can chat live with your bot on Telegram for interactive coaching:
+DrillOps features a built-in interactive bot powered by Google Gemini 2.5 Flash:
 
 ```bash
 npm run bot
 ```
 
-* **`/drill`**: View today's active challenge.
-* **`/hint`**: Ask the AI for a Socratic hint without spoiling the answer.
+* **`/drill`**: Re-display today's active challenge scenario and question.
+* **`/hint`**: Ask the AI mentor for a nudge without spoiling the full solution.
 * **`/solution`**: Reveal the complete architectural post-mortem early.
-* **Code Review & Feedback**: Reply with your proposed solution or code snippet, and the AI will evaluate edge cases, bottlenecks, and race conditions in real time!
-* **Freeform Q&A**: Ask any system design, Go, Node.js, Kubernetes, or SRE question anytime.
+* **Live Code Review**: Paste your proposed Go, Node.js, SQL, Terraform, or Kubernetes YAML snippet. The AI reviews it against memory leaks, race conditions, edge cases, and performance bottlenecks.
+* **Freeform SRE Mentorship**: Ask any follow-up systems question (e.g. *"Why is `rate()` preferred over `irate()` for alerting rules in Prometheus?"*).
 
 ---
 
-## 🛠️ Local Development & Testing
+## 🛠️ Quick Setup Guide
 
-You can run and test the pipeline on your machine:
+### Option 1: Telegram Setup (Recommended — 100% Free, Instant, No Timeouts)
+
+1. Open Telegram and search for **`@BotFather`**.
+2. Send `/newbot` and follow the prompts to choose a bot name and username (e.g., `MyDrillOpsBot`).
+3. Save the **Bot Token** provided (format: `123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ`).
+4. Find your numeric Telegram User ID:
+   - Message **`@userinfobot`** on Telegram.
+   - It will reply with your `Id` (e.g., `8623412037`).
+5. Open your new bot in Telegram and click **Start** (or send `/start`).
+
+---
+
+### Option 2: WhatsApp Setup (Alternative via CallMeBot)
+
+If you prefer WhatsApp notifications:
+1. Add CallMeBot's active phone number **`+34 644 95 42 75`** (or **`+34 623 78 64 49`**) to your phone contacts.
+2. Send the message `I allow callmebot to send me messages` to that contact.
+3. CallMeBot will reply with your API Key (e.g., `123456`).
+
+---
+
+### Option 3: Get a Free Google Gemini API Key
+
+To enable AI enrichment and the 2-way Telegram mentor:
+1. Visit [Google AI Studio](https://aistudio.google.com/app/apikey).
+2. Click **Create API key** (completely free tier).
+3. Copy your API key.
+
+---
+
+## 🚢 Deploying with GitHub Actions (Automated Daily Drills)
+
+### Step 1: Push This Repository to GitHub
 
 ```bash
 cd /Users/macbookpro/Documents/inimfon/daily-tech-drill
 
-# Test morning challenge in terminal (Dry Run - no WhatsApp message sent)
+# Verify git status
+git status
+
+# If setting up a new remote repository:
+git remote add origin https://github.com/<YOUR_GITHUB_USERNAME>/drillops.git
+git branch -M main
+git push -u origin main
+```
+
+### Step 2: Configure GitHub Repository Secrets
+
+1. In your GitHub repository, navigate to **Settings** → **Secrets and variables** → **Actions**.
+2. Click **New repository secret** and add your secrets:
+
+| Secret Name | Description | Recommended Value |
+| :--- | :--- | :--- |
+| `NOTIFICATION_PROVIDER` | Notification platform | `telegram` (or `callmebot`) |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from `@BotFather` | `123456789:ABC...` |
+| `TELEGRAM_CHAT_ID` | Numeric Chat ID from `@userinfobot` | `8623412037` |
+| `GEMINI_API_KEY` | Google AI Studio free API key | `AIzaSy...` |
+| `CALLMEBOT_PHONE` | *(WhatsApp only)* Your phone number | `2348012345678` |
+| `CALLMEBOT_API_KEY` | *(WhatsApp only)* CallMeBot API key | `123456` |
+
+### Step 3: Test Run Your Workflow
+
+1. In GitHub, go to the **Actions** tab.
+2. Select **DrillOps Pipeline** from the left sidebar.
+3. Click **Run workflow**:
+   - Phase: `morning`
+   - Dry run: `false`
+4. Check your Telegram/WhatsApp — your challenge arrives in seconds!
+
+---
+
+## 🌐 Hosting the 2-Way Interactive Bot (24/7)
+
+* **Daily Scheduled Drills**: Run 100% free with zero infrastructure via **GitHub Actions** (08:00 and 18:00 UTC).
+* **24/7 Interactive AI Mentor**: The interactive Telegram listener (`npm run bot`) can run locally or on any free/low-cost container service:
+  - **Local/Screen/Tmux**: `npm run bot`
+  - **Render / Railway / Fly.io**: Create a Background Worker or Web Service pointing to `npm run bot`.
+  - **VPS (Systemd)**: Run as a lightweight background daemon (`systemctl start drillops-bot`).
+
+---
+
+## 💻 Local Testing & CLI Commands
+
+You can run the engine directly from your terminal:
+
+```bash
+# Morning challenge preview (Dry run - outputs formatted message to console)
 npm run drill:test
 
-# Test evening deep dive
+# Evening post-mortem preview
 npm run drill:evening -- --dry-run
 
-# Test a specific domain (e.g. Go or Node)
+# Test a specific topic domain
 node src/index.js --phase morning --topic golang --dry-run
-node src/index.js --phase morning --topic nodejs --dry-run
+node src/index.js --phase morning --topic architecture --dry-run
+node src/index.js --phase morning --topic incident --dry-run
+
+# Run the 2-way AI Telegram Bot listener
+npm run bot
 ```
 
 ---
 
-## 📂 Project Structure
+## 📂 Project Architecture
 
 ```
-daily-tech-drill/
+drillops/
 ├── .github/
 │   └── workflows/
 │       └── daily-drill.yml       # GitHub Actions cron schedules (08:00 & 18:00 UTC)
 ├── data/
-│   ├── questions/                # Curated question banks by topic
+│   ├── questions/                # 140 Curated production scenarios (20 per domain)
 │   │   ├── devops.json
 │   │   ├── golang.json
 │   │   ├── nodejs.json
@@ -151,39 +199,50 @@ daily-tech-drill/
 │   │   ├── architecture.json
 │   │   └── incident.json
 │   └── state/
-│       ├── active_drill.json     # Tracks the active question between morning & evening
-│       └── history.json          # Tracks completed question IDs to prevent repeats
+│       ├── active_drill.json     # Tracks active challenge between morning & evening
+│       └── history.json          # Tracks completed challenge IDs to prevent repeats
 ├── src/
-│   ├── config.js                 # Configuration & environment variables
-│   ├── ai.js                     # Gemini API client for situational alerts & tips
-│   ├── engine.js                 # Domain rotation, question selection & message formatting
-│   ├── whatsapp.js               # CallMeBot & Twilio dispatchers with WhatsApp markdown
-│   └── index.js                  # CLI entrypoint
+│   ├── config.js                 # Environment variable validation & defaults
+│   ├── ai.js                     # Google Gemini API client (enrichment & mentor)
+│   ├── engine.js                 # Domain rotation, question selection & formatting
+│   ├── notifier.js               # Multi-channel notification dispatcher
+│   ├── telegram.js               # Telegram Bot API client & HTML message formatter
+│   ├── whatsapp.js               # CallMeBot & Twilio WhatsApp client
+│   ├── bot.js                    # Interactive 2-way Telegram AI mentor listener
+│   └── index.js                  # CLI pipeline entrypoint
+├── .env.example                  # Environment configuration template
 ├── package.json
 └── README.md
 ```
 
 ---
 
-## ✍️ Adding More Questions
+## ✍️ Adding Custom Questions
 
-To add your own scenarios, simply edit any JSON file in `data/questions/<topic>.json` and add a new object:
+To add custom scenarios, edit any file in `data/questions/<domain>.json` following this schema:
 
 ```json
 {
-  "id": "devops-004",
+  "id": "devops-021",
   "title": "Your Scenario Title",
   "domain": "DevOps & Containers",
   "difficulty": "Advanced",
-  "scenario": "A description of the production issue...",
-  "question": "What caused this and how do you fix it?",
+  "scenario": "A description of the production issue or architectural requirement...",
+  "question": "What caused this failure and how do you remediate it?",
   "hints": [
-    "Hint 1",
-    "Hint 2"
+    "First subtle indicator to look at...",
+    "Second structural consideration..."
   ],
-  "answer": "Detailed technical explanation...",
-  "pitfalls": "Common mistaken assumptions...",
+  "answer": "Comprehensive technical explanation with code/config solutions...",
+  "pitfalls": "Common mistaken assumptions or dangerous anti-patterns...",
   "key_takeaway": "One-line operational rule of thumb"
 }
 ```
-Commit and push to GitHub — the pipeline will automatically include it in the rotation.
+
+The pipeline automatically detects new questions and incorporates them into the rotation cycle.
+
+---
+
+## 📜 License
+
+MIT License. Feel free to fork, customize, and level up your engineering team!

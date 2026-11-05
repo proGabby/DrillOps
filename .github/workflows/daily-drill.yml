@@ -1,4 +1,4 @@
-name: Daily Tech Drill Pipeline
+name: DrillOps Pipeline
 
 on:
   schedule:
@@ -21,7 +21,7 @@ on:
         required: false
         default: ''
       dry_run:
-        description: 'Run without sending real WhatsApp message (dry run)'
+        description: 'Run without sending real notifications (dry run)'
         required: false
         type: boolean
         default: false
@@ -73,7 +73,7 @@ jobs:
           echo "phase=$PHASE" >> $GITHUB_OUTPUT
           echo "cmd_args=$CMD_ARGS" >> $GITHUB_OUTPUT
 
-      - name: Run Tech Drill Pipeline
+      - name: Run DrillOps Pipeline
         env:
           NOTIFICATION_PROVIDER: ${{ secrets.NOTIFICATION_PROVIDER }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -97,6 +97,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No state changes to commit."
           else
-            git commit -m "chore(state): update daily drill state [skip ci]"
+            git commit -m "chore(state): update DrillOps drill state [skip ci]"
             git push
           fi

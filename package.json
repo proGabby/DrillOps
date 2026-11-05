@@ -1,7 +1,7 @@
 {
-  "name": "daily-tech-drill",
+  "name": "drillops",
   "version": "1.0.0",
-  "description": "Automated 2-phase daily technical challenge pipeline for DevOps, Go, Node.js, SRE, and Tools delivered via WhatsApp.",
+  "description": "Automated 2-phase production engineering challenge pipeline & interactive AI mentor for Distributed Systems, DevOps, Go, Node.js, and SRE delivered via Telegram & WhatsApp.",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
@@ -12,12 +12,15 @@
     "drill:test": "node src/index.js --phase morning --dry-run"
   },
   "keywords": [
+    "drillops",
+    "distributed-systems",
     "devops",
+    "sre",
     "golang",
     "nodejs",
-    "sre",
+    "system-design",
     "interview-prep",
-    "whatsapp",
+    "telegram-bot",
     "automation",
     "github-actions"
   ],

@@ -21,7 +21,7 @@ function readActiveDrill() {
 function getWelcomeMessage(firstName = 'Engineer') {
   return `👋 *Hello, ${firstName}!*
 
-I am your personal *Daily Tech Drill & AI Engineering Mentor* powered by Google Gemini.
+I am your personal *DrillOps AI Engineering Mentor* powered by Google Gemini.
 
 🎯 *Daily Drill Commands:*
 • /drill — View today's active morning challenge

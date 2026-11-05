@@ -96,7 +96,7 @@ export async function buildMorningChallenge(overrideTopic = null) {
   // Optional AI dynamic context
   const aiMockLog = await enrichMorningChallenge(question);
 
-  let msg = `🧠 *DAILY TECH DRILL: MORNING CHALLENGE*\n`;
+  let msg = `🧠 *DRILLOPS: MORNING CHALLENGE*\n`;
   msg += `📅 *Track:* ${topic.name}\n`;
   msg += `🎯 *Focus:* ${question.title}\n`;
   msg += `📊 *Difficulty:* ${question.difficulty}\n\n`;
@@ -147,7 +147,7 @@ export async function buildEveningSolution() {
   // Optional AI senior pro-tip
   const aiTip = await enrichEveningSolution(question);
 
-  let msg = `✅ *DAILY TECH DRILL: EVENING DEEP DIVE*\n`;
+  let msg = `✅ *DRILLOPS: EVENING DEEP DIVE*\n`;
   msg += `🎯 *Topic:* ${question.title} (${topic.name})\n\n`;
 
   msg += `*The Solution & Post-Mortem:*\n${question.answer}\n\n`;

@@ -30,7 +30,7 @@ function parseArgs() {
 
 function printHelp() {
   console.log(`
-Daily Tech Drill Pipeline (DevOps, Go, Node.js, SRE, Tools)
+DrillOps: Production Engineering & Systems Challenge Pipeline
 ============================================================
 
 Usage:
@@ -38,7 +38,7 @@ Usage:
 
 Options:
   --phase <morning|evening>   Which phase to execute (default: morning)
-  --dry-run                   Print message to terminal without sending to WhatsApp
+  --dry-run                   Print message to terminal without sending
   --topic <name>              Override today's scheduled topic
   --help, -h                  Display this help message
 

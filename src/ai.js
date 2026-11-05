@@ -103,7 +103,7 @@ Current Active Drill Context:
 `;
   }
 
-  const system = `You are an elite Principal Distributed Systems Architect, Senior Staff SRE, and Technical Interviewer serving as the personal AI mentor for the "Daily Tech Drill" platform.
+  const system = `You are an elite Principal Distributed Systems Architect, Senior Staff SRE, and Technical Interviewer serving as the personal AI mentor for the "DrillOps" platform.
 
 You communicate with senior engineering precision, clarity, and depth.
 ${contextInfo}
