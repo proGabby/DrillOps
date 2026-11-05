@@ -1,0 +1,47 @@
+[
+  {
+    "id": "devops-001",
+    "title": "Kubernetes OOMKilled vs CrashLoopBackOff Mystery",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A stateful worker pod deployed on Kubernetes abruptly stops processing queue jobs every few hours. `kubectl get pods` displays `CrashLoopBackOff` with 12 restarts. However, checking `kubectl logs` displays no application stack traces or fatal error logs right before termination.",
+    "question": "What is the fastest command sequence to prove whether the Linux kernel invoked the OOM killer or Kubernetes terminated it due to failed liveness probes, and what is the key difference in remediation between the two?",
+    "hints": [
+      "Check `kubectl describe pod` under the `Last State` section and exit codes.",
+      "Exit code 137 indicates SIGKILL (128 + 9), which can be OOM or Kubernetes probe timeout."
+    ],
+    "answer": "1. Run `kubectl describe pod <pod-name>` and look at `Last State -> Terminated -> Reason` and `Exit Code`.\n- If `Reason: OOMKilled` (Exit Code 137), the container exceeded its `resources.limits.memory` or the node ran out of memory.\n- If `Reason: Error` or exit code 137/143 without OOMKilled, check `Events` at the bottom for failed liveness/readiness probes (e.g. `Liveness probe failed: HTTP probe failed with statuscode: 500` or timeout).\n\n2. Run `kubectl get pod <pod-name> -o jsonpath='{.status.containerStatuses[*].lastState.terminated}'` to view the exact termination payload.\n\n3. Remediation difference:\n- OOMKilled: Inspect application memory profiles (heap/buffers/goroutine leaks), optimize GC, or raise `limits.memory`.\n- Failed Probe: Adjust `initialDelaySeconds`, `timeoutSeconds`, or `failureThreshold` if the app was temporarily blocked by CPU saturation or slow external DB calls rather than genuinely dead.",
+    "pitfalls": "Many engineers blindly increase memory limits when seeing exit code 137, without realizing that a blocking liveness probe timeout also sends a SIGKILL after the termination grace period.",
+    "key_takeaway": "Exit Code 137 = Process killed with signal 9. Always verify `Reason: OOMKilled` in pod `Last State` before assuming it was a memory issue."
+  },
+  {
+    "id": "devops-002",
+    "title": "Docker Multi-Stage Build Cache Invalidation in CI",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate",
+    "scenario": "A Go backend microservice has a multi-stage Dockerfile. In your GitHub Actions CI pipeline, Docker builds take 6 minutes on every pull request, even when only a small markdown documentation file was updated.",
+    "question": "Identify what is wrong with the layer order below and how to leverage Docker BuildKit inline cache or GitHub Actions cache to drop build times to under 30 seconds:\n\n```dockerfile\nFROM golang:1.24-alpine AS builder\nWORKDIR /app\nCOPY . .\nRUN go mod download\nRUN CGO_ENABLED=0 go build -o server ./cmd/server\n```",
+    "hints": [
+      "Layer caching invalidates from the first line that changes.",
+      "Separate dependency resolution (`go.mod`, `go.sum`) from source code copies."
+    ],
+    "answer": "1. **Layer Ordering Fix:**\n`COPY . .` invalidates the entire cache layer whenever any single file in the repository changes (including docs or tests). Separate dependency declaration:\n\n```dockerfile\nFROM golang:1.24-alpine AS builder\nWORKDIR /app\n# Copy only dependency manifests first\nCOPY go.mod go.sum ./\nRUN go mod download\n\n# Copy remaining source code after dependencies are cached\nCOPY . .\nRUN CGO_ENABLED=0 go build -ldflags=\"-s -w\" -o server ./cmd/server\n\nFROM alpine:3.20\nWORKDIR /app\nRUN apk --no-cache add ca-certificates\nCOPY --from=builder /app/server .\nUSER nobody\nENTRYPOINT [\"/app/server\"]\n```\n\n2. **GitHub Actions BuildKit Cache:**\nIn CI, each runner starts fresh without local Docker cache. Use `docker/build-push-action` with GitHub Actions cache:\n```yaml\n- uses: docker/build-push-action@v5\n  with:\n    cache-from: type=gha\n    cache-to: type=gha,mode=max\n```",
+    "pitfalls": "Leaving `COPY . .` before dependency download invalidates third-party package caching on every single git commit.",
+    "key_takeaway": "Order Docker instructions from least frequently changed (base images, dependency manifests) to most frequently changed (source code)."
+  },
+  {
+    "id": "devops-003",
+    "title": "ArgoCD / GitOps Out-of-Sync Loop on Dynamic Fields",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "After deploying a deployment manifest via ArgoCD, the application stays indefinitely in `OutOfSync` status or flaps between `Synced` and `OutOfSync`, despite no new commits in the Git repository.",
+    "question": "What common Kubernetes mutation mechanisms cause GitOps controllers to detect infinite drift, and how do you configure ArgoCD to ignore these dynamic fields without disabling automated sync?",
+    "hints": [
+      "Mutating admission webhooks (like Linkerd/Istio sidecars, or HPA replica counts) modify resources after Git commits them.",
+      "ArgoCD has an `ignoreDifferences` spec."
+    ],
+    "answer": "1. **Root Cause:**\nDynamic or mutated fields in live cluster state that are not tracked in Git. The two most common culprits:\n- **HorizontalPodAutoscaler (HPA):** HPA mutates `spec.replicas` on the Deployment. Git specifies `replicas: 3`, but HPA scales it to `10`. ArgoCD sees `3 != 10` and attempts to revert it.\n- **Mutating Admission Webhooks:** Injected sidecars (Istio, Datadog), default service account tokens, or injected annotations.\n\n2. **Solution (ignoreDifferences):**\nIn the ArgoCD `Application` manifest or global `argocd-cm` configmap, add `ignoreDifferences`:\n\n```yaml\nspec:\n  ignoreDifferences:\n  - group: apps\n    kind: Deployment\n    jsonPointers:\n    - /spec/replicas\n```\nAnd in the Deployment manifest in Git, omit `spec.replicas` altogether so HPA owns scaling.",
+    "pitfalls": "Setting `replicas: 1` in Git while running an HPA causes ArgoCD and HPA to fight continuously, creating pod thrashing in production.",
+    "key_takeaway": "Never define static `replicas` in Git when using HPA, and use `ignoreDifferences` for admission-controller mutations."
+  }
+]
