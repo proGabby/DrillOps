@@ -34,7 +34,7 @@ function readJson(filePath, defaultValue = null) {
       const content = fs.readFileSync(tmpPath, 'utf8');
       return JSON.parse(content);
     }
-  } catch (_) {}
+  } catch (_) { }
 
   return defaultValue;
 }
@@ -52,7 +52,7 @@ function writeJson(filePath, data) {
     try {
       const tmpPath = path.join('/tmp', path.basename(filePath));
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
-    } catch (_) {}
+    } catch (_) { }
   }
 }
 
