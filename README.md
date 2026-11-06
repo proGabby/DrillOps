@@ -152,7 +152,7 @@ git push -u origin main
 
 ## Hosting the 2-Way Interactive Bot (24/7)
 
-* **Daily Scheduled Drills**: Run 100% free with zero infrastructure via **GitHub Actions** (08:00 and 18:00 UTC).
+* **Daily Scheduled Drills**: Automatically delivered with second-level precision via **Vercel Native Cron** (07:15 AM WAT and 08:30 PM WAT) or GitHub Actions.
 * **24/7 Interactive AI Mentor (Vercel Serverless Webhook - Recommended)**:
   Instead of keeping a laptop or server running 24/7, deploy the built-in serverless webhook to Vercel:
   1. Push this repository to your GitHub.
@@ -214,6 +214,7 @@ drillops/
 │   └── workflows/
 │       └── daily-drill.yml       # GitHub Actions cron schedules (08:00 & 18:00 UTC)
 ├── api/
+│   ├── cron.js                   # Vercel native cron for scheduled morning & evening drills
 │   └── webhook.js                # Vercel serverless function for Telegram 24/7 AI mentor
 ├── data/
 │   ├── questions/                # 140 Curated production scenarios (20 per domain)

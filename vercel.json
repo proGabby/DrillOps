@@ -1,9 +1,18 @@
 {
   "version": 2,
   "functions": {
-    "api/webhook.js": {
-      "maxDuration": 15
+    "api/*.js": {
+      "maxDuration": 30
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron?phase=morning",
+      "schedule": "15 6 * * *"
+    },
+    {
+      "path": "/api/cron?phase=evening",
+      "schedule": "30 19 * * *"
+    }
+  ]
 }
-
