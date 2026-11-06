@@ -2,10 +2,10 @@ name: DrillOps Pipeline
 
 on:
   schedule:
-    # Morning Challenge: 08:00 AM UTC (Adjust as needed for your timezone)
-    - cron: '0 8 * * *'
-    # Evening Solution & Deep Dive: 06:00 PM UTC (18:00 UTC)
-    - cron: '0 18 * * *'
+    # Morning Challenge: 06:15 AM UTC (07:15 AM WAT)
+    - cron: '15 6 * * *'
+    # Evening Solution & Deep Dive: 06:20 PM UTC (07:20 PM WAT)
+    - cron: '20 18 * * *'
   workflow_dispatch:
     inputs:
       phase:
