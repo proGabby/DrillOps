@@ -79,7 +79,7 @@ export function loadQuestionsForTopic(topicFile) {
 /**
  * Pick next uncompleted question for a topic, resetting history if exhausted
  */
-export function selectQuestionForDrill(topic) {
+export function selectQuestionForDrill(topic, targetDate = new Date()) {
   const allQuestions = loadQuestionsForTopic(topic.file);
   if (!allQuestions || allQuestions.length === 0) {
     throw new Error(`No questions found in bank for ${topic.name} (${topic.file})`);
@@ -90,14 +90,14 @@ export function selectQuestionForDrill(topic) {
 
   let available = allQuestions.filter(q => !completedIds.has(q.id));
 
-  // If all questions have been delivered, reset completed IDs for this domain
-  if (available.length === 0) {
-    console.log(`[Info] All questions in ${topic.name} have been drilled! Cycling question bank.`);
-    available = allQuestions;
-    // Clear only this domain's IDs
-    const domainIds = new Set(allQuestions.map(q => q.id));
-    history.completed_drill_ids = history.completed_drill_ids.filter(id => !domainIds.has(id));
-    writeJson(CONFIG.paths.historyFile, history);
+  // If in stateless serverless environments (e.g. Vercel) where history is not persisted across containers,
+  // cycle deterministically across weeks based on date so morning & evening always match
+  if (available.length === 0 || completedIds.size === 0) {
+    const epoch = new Date('2026-01-01T00:00:00Z').getTime();
+    const now = targetDate.getTime();
+    const diffWeeks = Math.max(0, Math.floor((now - epoch) / (7 * 24 * 60 * 60 * 1000)));
+    const index = diffWeeks % allQuestions.length;
+    return allQuestions[index];
   }
 
   // Select the next question
@@ -154,11 +154,20 @@ export async function buildMorningChallenge(overrideTopic = null) {
 /**
  * Build the Evening Solution & Deep Dive message
  */
-export async function buildEveningSolution() {
-  const activeDrill = readJson(CONFIG.paths.activeDrillFile);
+export async function buildEveningSolution(overrideTopic = null) {
+  let activeDrill = readJson(CONFIG.paths.activeDrillFile);
+  const todayStr = new Date().toISOString().split('T')[0];
 
-  if (!activeDrill || !activeDrill.question) {
-    throw new Error('No active morning drill found to solve. Run morning phase first or specify a test.');
+  // In stateless serverless environments (Vercel), morning state file is not preserved across containers.
+  // If active_drill.json is null or missing for today, resolve today's scheduled drill automatically!
+  if (!activeDrill || !activeDrill.question || activeDrill.date !== todayStr) {
+    const topic = getTopicForToday(overrideTopic);
+    const question = selectQuestionForDrill(topic);
+    activeDrill = {
+      date: todayStr,
+      topic,
+      question
+    };
   }
 
   const { question, topic } = activeDrill;

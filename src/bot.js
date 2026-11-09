@@ -6,13 +6,18 @@ import url from 'node:url';
 import { CONFIG } from './config.js';
 import { getBotInfo, getUpdates, sendTelegramReply, sendChatAction } from './telegram.js';
 import { askAIAssistant } from './ai.js';
-import { buildMorningChallenge, buildEveningSolution } from './engine.js';
+import { buildMorningChallenge, buildEveningSolution, getTopicForToday, selectQuestionForDrill } from './engine.js';
 
 export function readActiveDrill() {
+  const todayStr = new Date().toISOString().split('T')[0];
+
   try {
     if (fs.existsSync(CONFIG.paths.activeDrillFile)) {
       const content = fs.readFileSync(CONFIG.paths.activeDrillFile, 'utf8');
-      return JSON.parse(content);
+      const parsed = JSON.parse(content);
+      if (parsed && parsed.question && parsed.date === todayStr) {
+        return parsed;
+      }
     }
   } catch (err) {
     // Ignore read errors
@@ -23,11 +28,21 @@ export function readActiveDrill() {
     const tmpPath = path.join('/tmp', path.basename(CONFIG.paths.activeDrillFile));
     if (fs.existsSync(tmpPath)) {
       const content = fs.readFileSync(tmpPath, 'utf8');
-      return JSON.parse(content);
+      const parsed = JSON.parse(content);
+      if (parsed && parsed.question && parsed.date === todayStr) {
+        return parsed;
+      }
     }
   } catch (_) { }
 
-  return null;
+  // In stateless serverless environments (e.g. Vercel), dynamically resolve today's scheduled drill
+  const topic = getTopicForToday();
+  const question = selectQuestionForDrill(topic);
+  return {
+    date: todayStr,
+    topic,
+    question
+  };
 }
 
 export function getWelcomeMessage(firstName = 'Engineer') {
