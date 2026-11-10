@@ -1,12 +1,18 @@
 {
   "completed_drill_ids": [
-    "go-001"
+    "go-001",
+    "go-002"
   ],
   "history": [
     {
       "drill_id": "go-001",
       "domain": "Backend with Go",
       "completed_at": "2026-11-06T23:12:20.299Z"
+    },
+    {
+      "drill_id": "go-002",
+      "domain": "Backend with Go",
+      "completed_at": "2026-11-10T14:56:49.355Z"
     }
   ]
 }
