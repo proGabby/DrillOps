@@ -3,7 +3,8 @@
     "go-001",
     "go-002",
     "go-003",
-    "node-001"
+    "node-001",
+    "sre-001"
   ],
   "history": [
     {
@@ -25,6 +26,11 @@
       "drill_id": "node-001",
       "domain": "Node.js Backend & Libuv",
       "completed_at": "2026-11-11T14:27:55.842Z"
+    },
+    {
+      "drill_id": "sre-001",
+      "domain": "Site Reliability Engineering (SRE)",
+      "completed_at": "2026-11-12T15:20:07.433Z"
     }
   ]
 }
