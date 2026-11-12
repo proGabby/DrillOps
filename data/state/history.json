@@ -4,7 +4,8 @@
     "go-002",
     "go-003",
     "node-001",
-    "sre-001"
+    "sre-001",
+    "sre-002"
   ],
   "history": [
     {
@@ -31,6 +32,11 @@
       "drill_id": "sre-001",
       "domain": "Site Reliability Engineering (SRE)",
       "completed_at": "2026-11-12T15:20:07.433Z"
+    },
+    {
+      "drill_id": "sre-002",
+      "domain": "Site Reliability Engineering (SRE)",
+      "completed_at": "2026-11-12T23:40:16.551Z"
     }
   ]
 }
