@@ -93,7 +93,7 @@ export function selectQuestionForDrill(topic, targetDate = new Date()) {
   // If in stateless serverless environments (e.g. Vercel) where history is not persisted across containers,
   // cycle deterministically across weeks based on date so morning & evening always match
   if (available.length === 0 || completedIds.size === 0) {
-    const epoch = new Date('2026-01-01T00:00:00Z').getTime();
+    const epoch = new Date('2026-11-09T00:00:00Z').getTime();
     const now = targetDate.getTime();
     const diffWeeks = Math.max(0, Math.floor((now - epoch) / (7 * 24 * 60 * 60 * 1000)));
     const index = diffWeeks % allQuestions.length;
