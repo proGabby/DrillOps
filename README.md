@@ -2,17 +2,22 @@
 
 An automated 2-phase daily technical challenge pipeline and interactive 2-way AI mentor designed to sharpen production engineering instincts and prepare engineers for Senior & Staff DevOps, SRE, and Distributed Systems roles. 
 
-Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morning and evening via **GitHub Actions**, backed by a curated bank of **140 production scenarios** and an interactive **Google Gemini AI mentor** for progressive hints, architectural evaluations, and live code reviews.
+Delivered directly to your **Telegram** (recommended) or **WhatsApp** every morning and evening via **Vercel Native Cron** or **GitHub Actions**, backed by a curated bank of **280 production scenarios** structured in a **4-stage progressive ladder** and an interactive **Google Gemini AI mentor** for progressive hints, architectural evaluations, and live code reviews.
 
 ---
 
 ## Key Highlights
 
-* **140 Curated Scenarios**: 20 deep-dive production engineering challenges across 7 core domains, cycling automatically with state tracking to guarantee zero duplicates until the full bank is exhausted.
-* **2-Phase Spaced Repetition**: Morning incident scenario (08:00 UTC) gives you the day to think and architect; Evening post-mortem (18:00 UTC) reveals the full root-cause analysis, pitfalls, and Staff Engineer takeaways.
+* **280 Curated Scenarios**: 40 challenges across each of the 7 core domains, spanning 40 weeks (~10 months) of structured daily spaced repetition.
+* **4-Stage Progressive Ladder**: Every domain follows a calibrated difficulty progression designed to build foundational mastery before tackling Staff-level distributed systems:
+  - **Stage 1 (Questions 001-010) — Beginner**: Core primitives, process lifecycles, and essential mental models.
+  - **Stage 2 (Questions 011-020) — Intermediate**: Production patterns, clean idioms, and resilient configuration best practices.
+  - **Stage 3 (Questions 021-030) — Intermediate-Advanced**: Concurrency hazards, race conditions, memory leaks, and complex edge cases.
+  - **Stage 4 (Questions 031-040) — Advanced**: Staff-level distributed systems, consensus anomalies, kernel internals, and high-stakes post-mortems.
+* **2-Phase Spaced Repetition**: Morning incident scenario gives you the day to think and architect; Evening post-mortem reveals the full root-cause analysis, pitfalls, and Staff Engineer takeaways.
 * **Interactive 2-Way AI Mentor (Telegram)**: Chat directly with your bot throughout the day. Ask for progressive Socratic hints (`/hint`), reveal the solution early (`/solution`), or paste your code snippet/architecture design for an instant SRE review.
+* **Dual Automation Support**: Schedule with second-level precision via Vercel Native Cron (07:15 AM WAT and 08:30 PM WAT) or GitHub Actions.
 * **Zero Runtime Dependencies**: Built entirely with native Node.js ESM and built-in `fetch`. No bulky node_modules or third-party runtime dependencies.
-* **100% Free to Run**: Hosted entirely on GitHub Actions cron schedules with free Telegram Bot and Google Gemini API tiers.
 
 ---
 
@@ -217,7 +222,7 @@ drillops/
 │   ├── cron.js                   # Vercel native cron for scheduled morning & evening drills
 │   └── webhook.js                # Vercel serverless function for Telegram 24/7 AI mentor
 ├── data/
-│   ├── questions/                # 140 Curated production scenarios (20 per domain)
+│   ├── questions/                # 280 Curated production scenarios (40 per domain across 4 stages)
 │   │   ├── devops.json
 │   │   ├── golang.json
 │   │   ├── nodejs.json
