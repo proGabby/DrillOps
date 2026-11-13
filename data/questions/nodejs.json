@@ -298,5 +298,305 @@
     "answer": "1. **The Connection Pool Leak:**\nWhen you call `const client = await pool.connect()`, you borrow one of the 20 available TCP connections. If your code encounters an error or returns early without executing `client.release()`, that connection is **never returned to the pool**. After 20 leaked connections, the pool has 0 available connections, and all future database queries queue and time out forever.\n\n2. **The Fix:**\n- **For single queries:** Use `pool.query(sql, params)`. It automatically acquires and releases the connection back to the pool safely:\n```javascript\n// Safe: Auto-manages connection checkout and release\nconst res = await pool.query('SELECT * FROM users WHERE id = $1', [id]);\n```\n- **For multi-statement transactions:** Always release in a `finally` block:\n```javascript\nconst client = await pool.connect();\ntry {\n  await client.query('BEGIN');\n  // ...\n  await client.query('COMMIT');\n} finally {\n  client.release(); // GUARANTEED to return to pool!\n}\n```",
     "pitfalls": "Putting `client.release()` inside the `try` block before the error occurs; an error skips the release statement.",
     "key_takeaway": "Always release checked-out database connections in a `finally` block, or use `pool.query()` for automatic release."
+  },
+  {
+    "id": "node-021",
+    "title": "Event Loop Microtask Starvation via process.nextTick",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A developer writes a recursive queue processor using `process.nextTick`:\n```javascript\nfunction processQueue() {\n  // do work\n  process.nextTick(processQueue);\n}\nprocessQueue();\n```\nOnce deployed, all HTTP requests, timers (`setTimeout`), and I/O operations freeze completely. The server stops responding to network requests.",
+    "question": "What is the difference between the Microtask Queue (`process.nextTick`, Promise resolutions) and the libuv Event Loop phases, and how does an infinite microtask chain starve the entire server?",
+    "hints": [
+      "`process.nextTick` does not run in a libuv phase; it runs immediately after the current operation finishes.",
+      "The event loop cannot proceed to the next phase until the microtask queue is 100% empty."
+    ],
+    "answer": "1. **Microtasks vs Event Loop Phases:**\nThe libuv event loop moves through sequential phases (Timers -> Poll -> Check). However, the **Microtask Queue** (which holds `process.nextTick` callbacks and resolved `Promise.then` callbacks) is executed **immediately between operations** and after every phase.\n\n2. **Microtask Starvation:**\nBefore Node.js can move to the next event loop phase (e.g. processing incoming HTTP sockets in the Poll phase or timers in the Timers phase), **it must exhaust the entire microtask queue**. \n\nIf `process.nextTick` recursively schedules another `process.nextTick`, the microtask queue is never empty. The event loop is **completely starved** and can never advance to process I/O, timers, or network packets, locking the process.\n\n3. **The Fix:**\nUse `setImmediate()` instead of `process.nextTick()`:\n```javascript\nfunction processQueue() {\n  // do work\n  setImmediate(processQueue); // Yields back to the event loop Check phase!\n}\n```\n`setImmediate` queues the callback in the Check phase, allowing the event loop to cycle through I/O, Timers, and incoming HTTP requests between tasks.",
+    "pitfalls": "Using `process.nextTick` for recursive loops. `process.nextTick` should only be used to emit events synchronously after an object is constructed.",
+    "key_takeaway": "Never call `process.nextTick` recursively; use `setImmediate` to yield execution back to the event loop."
+  },
+  {
+    "id": "node-022",
+    "title": "libuv Thread Pool Starvation & DNS Resolution Latency",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Node.js microservice hashes passwords with `bcrypt.hash()` or `crypto.pbkdf2()`. Under 10 concurrent login requests, incoming file system reads and external HTTP API calls stall for several seconds, even though CPU usage is only 25%.",
+    "question": "Which Node.js operations rely on the internal libuv thread pool (rather than non-blocking OS epoll/kqueue), what is the default `UV_THREADPOOL_SIZE`, and how does thread pool exhaustion cause DNS and file latency spikes?",
+    "hints": [
+      "Network TCP sockets use OS epoll; file system I/O, DNS `dns.lookup`, and crypto algorithms use the libuv thread pool.",
+      "The default thread pool size is only 4 threads."
+    ],
+    "answer": "1. **What Uses the Thread Pool:**\nNode.js uses non-blocking kernel event notifications (epoll on Linux, kqueue on macOS) for network sockets. However, four specific operations cannot use epoll and must run on libuv's background thread pool:\n- All File System operations (`fs.*`)\n- DNS resolution via `dns.lookup()` (used by `http.request`)\n- Cryptography algorithms (`crypto.pbkdf2`, `crypto.randomBytes`, bcrypt)\n- Compression (`zlib.*`)\n\n2. **The Starvation Bottleneck:**\nBy default, `UV_THREADPOOL_SIZE` is **4**. If 4 concurrent requests execute CPU-heavy password hashing (`pbkdf2` / `bcrypt`), all 4 libuv threads are occupied for 500ms.\n\nAny concurrent request that needs to read a file or resolve an external DNS name (`dns.lookup`) is blocked in the thread pool queue. The HTTP request hangs waiting for a free thread.\n\n3. **The Fix:**\nIncrease the thread pool size before starting Node.js:\n```bash\nUV_THREADPOOL_SIZE=64 node server.js\n```\nOr offload heavy cryptography to dedicated **Worker Threads**.",
+    "pitfalls": "Setting `process.env.UV_THREADPOOL_SIZE = 64` inside JavaScript code. The thread pool is initialized by libuv before JavaScript runs; it must be set in the OS environment before process launch.",
+    "key_takeaway": "Set `UV_THREADPOOL_SIZE=64` in your environment to prevent slow crypto or file I/O from starving DNS lookups."
+  },
+  {
+    "id": "node-023",
+    "title": "Memory Leak Diagnosis: Retaining Paths & Closures in V8 Heap Snapshots",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Node.js production service experiences a slow memory leak, growing by 50 MB every hour until it hits the container memory limit and restarts. Inspecting the code reveals no obvious global arrays.",
+    "question": "How do JavaScript closures create hidden retaining paths that prevent garbage collection, and how do you use Chrome DevTools or `v8.getHeapSnapshot()` to find the retaining root?",
+    "hints": [
+      "If an inner function closes over a variable in an outer scope, all sibling closures in that scope share the same context object.",
+      "Look for the 'Retainers' panel in Chrome DevTools."
+    ],
+    "answer": "1. **The Shared Closure Context Trap (The Meteor Leak):**\nWhen multiple closures share an enclosing scope, V8 allocates a single shared `Context` object for all variables in that scope. Consider:\n```javascript\nlet theThing = null;\nfunction replaceThing() {\n  let originalThing = theThing;\n  let unused = function () {\n    if (originalThing) console.log('hi'); // Closes over originalThing\n  };\n  theThing = {\n    longStr: new Array(1000000).join('*'),\n    someMethod: function () {} // Shares context with unused!\n  };\n}\nsetInterval(replaceThing, 1000);\n```\nEven though `unused` is never called, `someMethod` shares the closure context with `unused`, keeping `originalThing` alive in memory indefinitely. Every second, a new 1 MB array is linked to the previous one in an unbroken chain!\n\n2. **Capturing Heap Snapshots in Production:**\n```javascript\nimport v8 from 'node:v8';\nimport fs from 'node:fs';\n\nfunction takeSnapshot() {\n  const snapshotStream = v8.getHeapSnapshot();\n  const fileName = `/tmp/heap-${Date.now()}.heapsnapshot`;\n  const fileStream = fs.createWriteStream(fileName);\n  snapshotStream.pipe(fileStream);\n}\n```\nLoad the file into Chrome DevTools -> Memory -> Load. Inspect the **Retainers** tree to see what object reference prevents GC.",
+    "pitfalls": "Taking heap snapshots in production without realizing that generating a 1.5 GB snapshot pauses the event loop for several seconds.",
+    "key_takeaway": "Inspect the Retainers path in V8 heap snapshots to find which closure or global root is keeping dead memory alive."
+  },
+  {
+    "id": "node-024",
+    "title": "AsyncLocalStorage: Request Context & Tracing Without Prop Drilling",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "You need to log a `correlationId` and user authentication context on every database query, log statement, and HTTP call across 50 internal service files. Developers are currently passing `ctx` through every single function parameter.",
+    "question": "How does Node.js `AsyncLocalStorage` provide thread-local-storage equivalent functionality across asynchronous promise chains, and how do you implement a request-scoped logger?",
+    "hints": [
+      "`AsyncLocalStorage` tracks asynchronous execution contexts across callbacks, promises, and timers.",
+      "It wraps request handlers using `.run(store, callback)`."
+    ],
+    "answer": "1. **What is AsyncLocalStorage:**\nIn multithreaded runtimes (Java/Go), thread-local storage tracks request data on the OS thread. Because Node.js multiplexes thousands of requests concurrently on a single thread, thread-local storage is impossible. \n\n`AsyncLocalStorage` (built on `async_hooks`) tracks context through the asynchronous Promise lifecycle, ensuring that callbacks and `await` operations retain access to the context in which they were created.\n\n2. **Implementation:**\n```javascript\nimport { AsyncLocalStorage } from 'node:async_hooks';\n\nexport const requestStore = new AsyncLocalStorage();\n\n// Middleware\napp.use((req, res, next) => {\n  const context = { correlationId: req.headers['x-correlation-id'] || crypto.randomUUID() };\n  requestStore.run(context, () => next());\n});\n\n// Anywhere in deep database/utility code without passing req:\nexport function log(msg) {\n  const store = requestStore.getStore();\n  const traceId = store?.correlationId || 'unknown';\n  console.log(`[${traceId}] ${msg}`);\n}\n```",
+    "pitfalls": "Using `AsyncLocalStorage` in microsecond hot paths without benchmarking; it introduces a small (~2\u20135%) Promise creation overhead.",
+    "key_takeaway": "Use `AsyncLocalStorage` to propagate request IDs and telemetry across async calls without parameter drilling."
+  },
+  {
+    "id": "node-025",
+    "title": "Scaling Models: Cluster Module vs Worker Threads vs Containers",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A 16-core physical server runs a Node.js microservice. System metrics show overall CPU utilization is only 6.25% (exactly 1/16th of server capacity) while customer requests are queuing.",
+    "question": "Why does a standard Node.js process only utilize 1 CPU core, and when should you use the `cluster` module, `worker_threads`, or Kubernetes container replicas to scale?",
+    "hints": [
+      "Cluster module spawns separate OS processes sharing a server port via master IPC.",
+      "Worker Threads share memory within the same process; ideal for CPU tasks."
+    ],
+    "answer": "1. **Why 6.25% CPU:**\nA Node.js process runs on a single event loop core. On a 16-core server, one core at 100% is `1/16 = 6.25%` total CPU.\n\n2. **The 3 Scaling Approaches:**\n- **Cluster Module (`node:cluster`):** Forks multiple independent Node.js processes (one per CPU core) that share the same server port. Master process uses round-robin to distribute incoming TCP connections. Ideal for **monolithic VM deployments** (bare-metal/EC2).\n- **Worker Threads (`worker_threads`):** Multiple threads running inside the **same process**, sharing memory via `SharedArrayBuffer`. Ideal for **CPU-intensive computation** (image resizing, ML, cryptography).\n- **Container Scaling (Production Standard):** Run single-process Node.js containers in Kubernetes, scaling replicas across nodes. Eliminates in-process cluster master crashes.",
+    "pitfalls": "Storing in-memory session state in cluster workers without Redis. Worker 1 cannot see memory in Worker 2.",
+    "key_takeaway": "Use containers/Kubernetes for I/O scaling, Worker Threads for CPU tasks, and Cluster module on bare metal."
+  },
+  {
+    "id": "node-026",
+    "title": "Cryptographic CPU Freezes: crypto.pbkdf2Sync vs Worker Offloading",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A login endpoint verifies user passwords using `crypto.pbkdf2Sync(pass, salt, 100000, 64, 'sha512')`. During peak morning login hours, all other API endpoints freeze for 250ms on every login attempt.",
+    "question": "Why does `pbkdf2Sync` freeze the event loop, why does `pbkdf2` async utilize the libuv thread pool, and how does offloading to Worker Threads isolate cryptographic load?",
+    "hints": [
+      "Any function ending in `Sync` executes directly on the main JavaScript thread.",
+      "The asynchronous version offloads computation to libuv background threads."
+    ],
+    "answer": "1. **The Sync Trap:**\nPassword hashing algorithms like PBKDF2, bcrypt, and Argon2 are intentionally designed to be computationally expensive (burning 100,000 SHA-512 iterations). Running `pbkdf2Sync` forces the single main JavaScript thread to execute millions of hash cycles, freezing all concurrent requests for 250ms.\n\n2. **The Fix:**\n- **Use Asynchronous Crypto:**\n```javascript\nimport crypto from 'node:crypto';\nimport { promisify } from 'node:util';\n\nconst pbkdf2 = promisify(crypto.pbkdf2);\n// Automatically offloaded to libuv background thread pool!\nconst hash = await pbkdf2(pass, salt, 100000, 64, 'sha512');\n```\n- **Or use Worker Threads:** If hashing load is sustained and threatens to starve the libuv thread pool (affecting DNS lookups), dedicate a pool of Worker Threads.",
+    "pitfalls": "Using `bcrypt.hashSync` in production web applications, which guarantees severe event loop lag spikes.",
+    "key_takeaway": "Never use synchronous cryptography (`*Sync`) in request paths; use async crypto or Worker Threads."
+  },
+  {
+    "id": "node-027",
+    "title": "EventEmitter MaxListenersExceededWarning & Closure Retainers",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "An SSE (Server-Sent Events) endpoint subscribes each client to a global notification bus: `bus.on('alert', sendAlert)`. As traffic increases, the service starts logging `MaxListenersExceededWarning`, and heap memory grows linearly until crash.",
+    "question": "Why does attaching closures to long-lived singleton EventEmitters cause rapid memory accumulation, and how do you properly deregister event handlers on client disconnect?",
+    "hints": [
+      "The global singleton retains a pointer to the client's response object.",
+      "Listen for `req.on('close')` to remove the listener."
+    ],
+    "answer": "1. **The Leak Mechanism:**\nThe global `bus` is a long-lived singleton. Each time a client connects, `bus.on('alert', sendAlert)` appends the `sendAlert` function to the bus's internal listener array. Because `sendAlert` references the client's `res` (HTTP response) object in its closure, **none of the response objects or their underlying TCP sockets can be garbage collected**, even after the user closes their browser.\n\n2. **The Solution:**\nClean up the listener the moment the client closes the HTTP connection:\n```javascript\napp.get('/events', (req, res) => {\n  const onAlert = (data) => {\n    res.write(`data: ${JSON.stringify(data)}\\n\\n`);\n  };\n\n  bus.on('alert', onAlert);\n\n  // Remove listener immediately when client disconnects\n  req.on('close', () => {\n    bus.off('alert', onAlert);\n  });\n});\n```",
+    "pitfalls": "Using anonymous arrow functions inline: `bus.on('alert', (d) => res.write(d))`. Because the function is anonymous, you cannot pass it to `bus.off()` later to remove it.",
+    "key_takeaway": "Always assign event handlers to named variables so you can deregister them on connection close."
+  },
+  {
+    "id": "node-028",
+    "title": "Handling Large JSON Payloads: Stream Parsing vs JSON.parse",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "An API endpoint accepts 80 MB JSON export files: `const data = JSON.parse(req.body)`. Whenever an 80 MB file is uploaded, the event loop freezes for 800ms, and under 5 concurrent uploads, the server crashes with V8 out-of-memory.",
+    "question": "Why does `JSON.parse` block the event loop and multiply memory consumption by 3x\u20135x, and how do stream parsers like `stream-json` process large payloads in constant memory?",
+    "hints": [
+      "`JSON.parse` requires the entire string in memory, allocates full object trees, and runs synchronously.",
+      "Stream parsers tokenize and emit JSON nodes one by one."
+    ],
+    "answer": "1. **The Memory & CPU Cost of JSON.parse:**\n- **Synchronous CPU:** `JSON.parse` cannot be paused or yielded. Parsing an 80 MB string takes 500\u20131,000ms of continuous CPU execution, blocking all other users.\n- **Memory Multiplication:** An 80 MB raw JSON string in V8 can consume **300 MB to 400 MB of heap memory** once converted into JavaScript objects, arrays, and hidden class metadata. 5 concurrent uploads easily exceed the 2 GB V8 heap limit.\n\n2. **The Stream Parsing Solution:**\nUse streaming JSON parsers (e.g. `stream-json` or `JSONStream`) that parse tokens as chunks arrive from the network:\n```javascript\nimport { parser } from 'stream-json';\nimport { streamArray } from 'stream-json/streamers/StreamArray.js';\nimport { pipeline } from 'node:stream/promises';\n\nawait pipeline(\n  req,\n  parser(),\n  streamArray(),\n  async function* (source) {\n    for await (const { value } of source) {\n      await processRecord(value); // Process one item at a time!\n    }\n  }\n);\n```\nMemory usage remains constant at ~20 MB regardless of whether the file is 80 MB or 10 GB.",
+    "pitfalls": "Buffering entire multi-megabyte payloads in memory before parsing instead of streaming.",
+    "key_takeaway": "Never use `JSON.parse()` on large payloads (>10MB); use streaming JSON parsers to maintain constant memory."
+  },
+  {
+    "id": "node-029",
+    "title": "Native Node-API (N-API) Addons vs WebAssembly (Wasm) in Node.js",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "You need to run a high-performance C/Rust image manipulation library inside your Node.js backend. You can either build a Native Node-API (N-API) C++ addon or compile the code to WebAssembly (Wasm).",
+    "question": "Compare Native C++ Addons (Node-API) and WebAssembly (Wasm) in Node.js regarding memory safety, execution speed, ABI stability, and compilation complexity in CI/CD.",
+    "hints": [
+      "Node-API provides an Application Binary Interface (ABI) stable across Node.js versions.",
+      "WebAssembly runs in a memory-safe sandbox and requires zero native compilation on target host machines."
+    ],
+    "answer": "1. **Node-API (C++ / Rust Addons):**\n- **Pros:** Maximum native CPU performance (SIMD, direct hardware instructions), direct zero-copy access to Node.js `Buffer` memory.\n- **Cons:** A crash (segmentation fault) in C++ kills the entire Node.js process immediately. Requires compilation on target OS/architecture in CI (compiler toolchains, python, make).\n\n2. **WebAssembly (Wasm):**\n- **Pros:** 100% portable. A single `.wasm` binary runs identically on Linux, macOS, Windows, ARM64, and x86 without native compilers. Memory-safe sandbox: a crash in Wasm throws a catchable JavaScript error instead of crashing the process.\n- **Cons:** ~10%\u201320% slower than raw native C++ for extreme SIMD workloads, and copying data into Wasm linear memory incurs slight overhead.",
+    "pitfalls": "Deploying C++ addons without Node-API, causing the addon to break on every major Node.js runtime upgrade.",
+    "key_takeaway": "Choose WebAssembly for portable, memory-safe high performance; choose Node-API for extreme raw hardware speed."
+  },
+  {
+    "id": "node-030",
+    "title": "Graceful Termination: Socket Draining & Connection Closing",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "During a Kubernetes rolling deployment, clients connected over HTTP keep-alive experience connection resets (`ECONNRESET`) because Node.js terminates the process while keep-alive sockets are still idle.",
+    "question": "How does `server.close()` handle active vs idle keep-alive connections, and how does `server.closeIdleConnections()` (Node 18.2+) prevent connection reset errors during deploys?",
+    "hints": [
+      "`server.close()` stops accepting new connections but waits indefinitely for existing connections to close.",
+      "HTTP keep-alive keeps connections open for minutes waiting for future requests."
+    ],
+    "answer": "1. **The Keep-Alive Trap:**\nWhen Kubernetes sends `SIGTERM`, you call `server.close()`. `server.close()` stops accepting new connections and waits for existing connections to close.\n\nHowever, modern browsers and reverse proxies use **HTTP Keep-Alive**, holding TCP sockets open for up to 60 seconds waiting for future requests. `server.close()` will hang waiting for these idle keep-alive sockets until Kubernetes forcibly kills the container with `SIGKILL` (exit code 137), severing active connections!\n\n2. **The Fix (Node 18.2+):**\nUse `server.closeIdleConnections()` to immediately terminate idle keep-alive sockets while allowing active in-flight requests to complete:\n```javascript\nprocess.on('SIGTERM', () => {\n  console.log('SIGTERM received: Draining connections...');\n  server.close(() => {\n    console.log('All active requests completed. Exiting.');\n    process.exit(0);\n  });\n\n  // Immediately close sockets that are not currently processing a request!\n  server.closeIdleConnections();\n\n  // Hard timeout failsafe\n  setTimeout(() => process.exit(1), 10000);\n});\n```",
+    "pitfalls": "Calling `process.exit(0)` immediately inside the `SIGTERM` handler without calling `server.close()`.",
+    "key_takeaway": "Call `server.closeIdleConnections()` on SIGTERM to drop idle sockets without interrupting in-flight requests."
+  },
+  {
+    "id": "node-031",
+    "title": "V8 Garbage Collection: Scavenge (Minor GC) vs Mark-Sweep-Compact (Major GC)",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "A high-throughput API experiences periodic latency spikes every 30 seconds where p99 response time jumps from 5ms to 280ms. Running Node.js with `--trace-gc` shows frequent `Mark-sweep (reduce-memory)` pauses.",
+    "question": "How does the V8 Generational Garbage Collector divide memory into Young Generation (Semi-spaces) and Old Generation, and what causes objects to be promoted, triggering heavy Stop-the-World Major GC pauses?",
+    "hints": [
+      "Young generation uses Cheney's copying algorithm (Scavenge) which is fast (<1ms).",
+      "Surviving two scavenge cycles promotes an object to Old Space."
+    ],
+    "answer": "1. **Generational Garbage Collection:**\nV8 assumes the **Generational Hypothesis**: most objects die young. It divides the heap into:\n- **Young Generation (1\u201364 MB):** Divided into two semi-spaces (`From-space` and `To-space`). Cleaned by the **Scavenge (Minor GC)** algorithm. Minor GC is extremely fast (<1ms) because it only copies living objects to the other semi-space.\n- **Old Generation:** Holds long-lived objects. Cleaned by the **Major GC (Mark-Sweep-Compact)**.\n\n2. **The Cause of 280ms Pauses:**\nWhen an object survives two Minor GC cycles, it is **promoted** to Old Space. If an application holds large in-memory caches, closures, or bloated buffers, the Old Generation fills up.\n\nMajor GC must trace every pointer in the entire gigabyte heap (Marking), free dead objects (Sweeping), and defragment physical memory (Compacting). Even with incremental marking, Major GC can pause the event loop for hundreds of milliseconds.\n\n3. **Remediation:**\nMinimize promotions to Old Space. Keep objects short-lived, reuse temporary buffers via pools, and avoid long-lived in-memory caches.",
+    "pitfalls": "Increasing `--max-old-space-size=8192` to 'fix' GC pauses. A larger heap means Major GC pauses become even longer (up to several seconds).",
+    "key_takeaway": "Minor GC is sub-millisecond; Major GC pauses the event loop to compact Old Space. Minimize long-lived object promotions."
+  },
+  {
+    "id": "node-032",
+    "title": "EventLoopUtilization (ELU) vs CPU Percentage: Accurate Lag Detection",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "You configure a Kubernetes HPA to scale your Node.js pods based on CPU utilization. Under heavy asynchronous I/O load, response times degrade by 500%, but CPU utilization stays at only 40%, so the HPA fails to scale out.",
+    "question": "Why is OS CPU percentage misleading for single-threaded Node.js applications, and how does EventLoopUtilization (`perf_hooks.eventLoopUtilization`) accurately measure event loop saturation?",
+    "hints": [
+      "A thread waiting on epoll / network sockets registers 0% CPU usage.",
+      "ELU measures the ratio of time the event loop spent executing code vs waiting."
+    ],
+    "answer": "1. **Why CPU % Fails for Node.js:**\nOS CPU metrics measure the percentage of CPU cycles consumed. If your Node.js server is overwhelmed by thousands of concurrent requests where each request performs slight JSON parsing and waits on database sockets, the CPU may only be active 40% of the time. But the event loop may be 100% saturated with queued tasks.\n\n2. **EventLoopUtilization (ELU):**\nIntroduced in Node 14+, ELU measures the exact ratio of time the event loop spent actively executing JavaScript and event loop tasks vs the time it spent idling in the epoll/kqueue poll phase:\n```javascript\nimport { eventLoopUtilization } from 'node:perf_hooks';\n\nconst elu = eventLoopUtilization();\n// Returns: { idle: 500, active: 500, utilization: 0.5 }\n```\n- If `utilization = 1.0` (100%), the event loop is **completely saturated** with work and cannot handle more load, even if the OS reports low CPU usage.\n\n3. **Production Standard:** Autoscale Node.js workloads using ELU metrics rather than raw host CPU.",
+    "pitfalls": "Autoscaling Node.js exclusively on CPU percentage, allowing event loop saturation to cause severe latency degradation under I/O load.",
+    "key_takeaway": "Use EventLoopUtilization (ELU) to measure true event loop saturation instead of OS CPU percentage."
+  },
+  {
+    "id": "node-033",
+    "title": "ESM vs CommonJS: Circular Dependencies & Top-Level Await Deadlocks",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "Two ESM modules import each other: Module A has `await initA()` and imports B, while Module B has `await initB()` and imports A. When starting the application, Node.js hangs indefinitely with zero CPU usage and never starts listening.",
+    "question": "How does ESM module evaluation differ from CommonJS runtime evaluation, and what causes Top-Level Await dependency graph deadlocks?",
+    "hints": [
+      "ESM builds a module dependency graph and evaluates asynchronously in post-order traversal.",
+      "Circular dependencies with top-level await create cyclic Promise deadlocks."
+    ],
+    "answer": "1. **ESM Loading Phases:**\n1. **Construction:** Parses files and resolves imports statically into a Module Record.\n2. **Instantiation:** Allocates memory pointers for all exported identifiers.\n3. **Evaluation:** Executes the code in **post-order traversal** (dependencies execute before parents).\n\n2. **The Top-Level Await Deadlock:**\nIn CommonJS, circular dependencies return a partially evaluated object. In ESM, if Module A and Module B form a circular dependency and both use **Top-Level Await** (`await init()`), the module graph resolution deadlocks: Module A's evaluation Promise is waiting for Module B, but Module B's evaluation Promise is waiting for Module A. The module graph resolution hangs forever.\n\n3. **Remediation:**\nNever use Top-Level Await inside modules that participate in circular dependencies. Move asynchronous initialization into explicit `async init()` functions called after all modules have loaded.",
+    "pitfalls": "Using top-level await in library packages, which can introduce unannounced startup deadlocks into consuming applications.",
+    "key_takeaway": "Top-level await creates asynchronous module evaluation; avoid it in circular dependencies to prevent deadlocks."
+  },
+  {
+    "id": "node-034",
+    "title": "V8 Hidden Classes & Inline Caching: Polymorphic Degradation",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "A high-performance logging function processes 100,000 objects per second. When an engineer changes the order of properties when instantiating objects (`{ a, b }` vs `{ b, a }`), execution time increases by 4x.",
+    "question": "How does V8 optimize dynamic JavaScript objects using Hidden Classes (Shapes) and Inline Caching (IC), and what causes a call site to degrade into a slow megamorphic state?",
+    "hints": [
+      "V8 creates hidden classes behind the scenes based on property addition order.",
+      "Monomorphic call sites are blazing fast; megamorphic call sites fall back to hash table lookups."
+    ],
+    "answer": "1. **V8 Hidden Classes (Shapes):**\nJavaScript has no static classes, but V8 creates internal C++ structs called **Hidden Classes (Maps/Shapes)**. When you write `const obj = {}; obj.a = 1; obj.b = 2;`, V8 creates transitions:\n`Empty -> Shape1(a at offset 0) -> Shape2(b at offset 1)`.\n\nIf another object is created in reverse order (`obj.b = 2; obj.a = 1;`), V8 creates a **different hidden class**. Even though both objects have keys `a` and `b`, they do not share the same Shape!\n\n2. **Inline Caching (IC):**\nWhen a function accesses `obj.a`, V8 caches the memory offset (e.g. 'offset 0').\n- **Monomorphic (1 Shape):** Blazing fast direct memory pointer access (1 assembly instruction).\n- **Polymorphic (2\u20134 Shapes):** Small branching switch table.\n- **Megamorphic (>4 Shapes):** V8 abandons caching and falls back to a slow, generic dictionary hash table lookup.\n\n3. **Best Practice:**\nAlways initialize all object properties in the exact same order in constructors or factory functions, and initialize unused properties with `null` rather than deleting them.",
+    "pitfalls": "Using `delete obj.property`. Deleting a property forces the object into 'dictionary mode', stripping all hidden class optimizations.",
+    "key_takeaway": "Initialize object properties in consistent order to preserve V8 monomorphic Inline Caching."
+  },
+  {
+    "id": "node-035",
+    "title": "Diagnosing Off-Heap Memory Leaks: C++ Buffers & ArrayBuffers",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "In a Node.js production service, `process.memoryUsage().heapUsed` stays flat at 200 MB, but the Linux host reports `RSS` (Resident Set Size) memory climbing to 3.5 GB until the container is killed by OOM.",
+    "question": "Why do standard V8 heap snapshots fail to show memory leaks residing in `external` buffers or native C++ addons, and how do you diagnose off-heap memory growth?",
+    "hints": [
+      "`process.memoryUsage()` reports `heapUsed`, `heapTotal`, `external`, and `rss`.",
+      "Node.js `Buffer` instances allocate memory outside the V8 heap in C++ space."
+    ],
+    "answer": "1. **On-Heap vs Off-Heap Memory:**\n- **`heapUsed`:** Memory allocated by V8 for standard JavaScript objects, strings, and closures. Capped by `--max-old-space-size`.\n- **`external`:** Memory allocated in C++ backing store for Node.js `Buffer` and `ArrayBuffer` instances.\n- **`rss` (Resident Set Size):** The total physical RAM occupied by the entire Node.js process (V8 heap + external memory + native C++ addon memory + libuv stack).\n\n2. **Why Heap Snapshots Fail:**\nStandard V8 heap snapshots only inspect the V8 JavaScript heap. A `Buffer` object on the JS heap is tiny (~32 bytes), but its underlying pointer points to 100 MB of native C++ memory. If native buffers or C++ addons leak, `heapUsed` stays flat while `rss` climbs to infinity.\n\n3. **Diagnosis:**\n- Log `process.memoryUsage()`: Look for high `external` or `arrayBuffers`.\n- Use Linux tools: Inspect `/proc/<pid>/smaps` or run Node with `valgrind` / `ASan` (AddressSanitizer) to track C++ allocations.",
+    "pitfalls": "Increasing `--max-old-space-size` to fix an off-heap Buffer leak. The flag only affects V8 heap, not RSS.",
+    "key_takeaway": "If RSS memory grows while heapUsed is flat, inspect `external` memory and native Buffer allocations."
+  },
+  {
+    "id": "node-036",
+    "title": "High-Performance I/O: Libuv Poll Phase, epoll/kqueue & Sockets",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "An engineer asks: 'When 50,000 clients hold open WebSocket connections to a Node.js server, how does Node know which client sent data without scanning all 50,000 sockets?'",
+    "question": "Explain how libuv interfaces with Linux `epoll` (and macOS `kqueue`) in the event loop Poll phase to achieve O(1) event-driven socket handling.",
+    "hints": [
+      "Old `select()` and `poll()` system calls are O(N) linear scans.",
+      "`epoll_wait` puts the thread to sleep until the network card raises an interrupt for ready descriptors."
+    ],
+    "answer": "1. **The O(N) Bottleneck of select/poll:**\nIn legacy operating systems, `select()` and `poll()` require passing an array of all 50,000 file descriptors to the kernel. The kernel iterates through every socket to check readiness. This is O(N) and unusable at scale (the C10K problem).\n\n2. **The epoll Architecture (O(1)):**\nLinux `epoll` creates an in-kernel interest list using a Red-Black tree. \n- When a socket is created, libuv calls `epoll_ctl` to register the descriptor with the kernel once.\n- When network packets arrive at the Network Interface Card (NIC), hardware interrupts notify the kernel. The kernel places only the **active, ready sockets** onto an epoll ready list.\n- In the event loop's **Poll phase**, libuv calls `epoll_wait()`. The kernel returns **only the ready descriptors** in O(1) time.\n- Libuv iterates directly over the ready sockets and triggers their JavaScript data callbacks without scanning idle connections.",
+    "pitfalls": "Believing Node.js uses multithreading to handle concurrent socket connections. It uses a single thread with OS kernel epoll readiness notifications.",
+    "key_takeaway": "Node.js scales to 100k+ connections because libuv delegates socket readiness to Linux `epoll` in O(1) time."
+  },
+  {
+    "id": "node-037",
+    "title": "V8 JIT Compilation: Ignition Bytecode vs TurboFan Deoptimizations",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "A function in a high-frequency trading bot runs in 2ms. Occasionally, when unexpected data types pass through, the function's execution time spikes to 45ms for several thousand invocations.",
+    "question": "How does V8's JIT compilation pipeline (Ignition Interpreter -> Sparkplug -> TurboFan Compiler) optimize hot code, and what causes 'Deoptimization' (Bailout) back to interpreted bytecode?",
+    "hints": [
+      "Ignition generates bytecode; TurboFan generates optimized machine code based on type feedback.",
+      "Changing parameter types invalidates speculative optimizations."
+    ],
+    "answer": "1. **V8 JIT Compilation Pipeline:**\n1. **Ignition (Interpreter):** Compiles JavaScript into bytecode and executes immediately. Collects **type feedback metadata** (e.g., 'parameter `x` has always been an integer').\n2. **Sparkplug:** Fast non-optimizing compiler that converts bytecode directly to machine code.\n3. **TurboFan (Optimizing Compiler):** When a function becomes 'hot' (called thousands of times), TurboFan compiles it into heavily optimized machine code based on speculative type assumptions (e.g. omitting type checks).\n\n2. **The Deoptimization Bailout:**\nIf your hot function receives an argument that violates TurboFan's speculative assumption (e.g. passing a string `\"123\"` to a function that previously only saw integers `123`), the compiled machine code hits a guard check failure. \n\nV8 **deoptimizes** immediately: it bails out of the machine code, reconstructs the interpreted stack frame, and drops back to slow Ignition bytecode while invalidating the optimized machine code.",
+    "pitfalls": "Writing polymorphic functions that accept multiple different types for the same argument, triggering continuous TurboFan deoptimization loops.",
+    "key_takeaway": "Keep functions monomorphic (consistent argument types) to prevent V8 TurboFan deoptimization bailouts."
+  },
+  {
+    "id": "node-038",
+    "title": "Diagnosing Event Loop Delays with perf_hooks.monitorEventLoopDelay",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "Your production APM alerts on high latency, but CPU usage is 30% and database response times are fast. You need to mathematically prove that synchronous JavaScript execution is blocking the event loop.",
+    "question": "How do you use `perf_hooks.monitorEventLoopDelay` to record high-resolution event loop delay histograms (p50, p99, max), and what threshold indicates severe production lag?",
+    "hints": [
+      "`monitorEventLoopDelay` samples event loop delay at 10ms intervals.",
+      "Any event loop delay exceeding 50ms degrades HTTP throughput."
+    ],
+    "answer": "1. **Event Loop Delay Monitoring:**\n```javascript\nimport { monitorEventLoopDelay } from 'node:perf_hooks';\n\nconst histogram = monitorEventLoopDelay({ resolution: 20 }); // Sample every 20ms\nhistogram.enable();\n\nsetInterval(() => {\n  console.log({\n    min: `${(histogram.min / 1e6).toFixed(2)}ms`,\n    mean: `${(histogram.mean / 1e6).toFixed(2)}ms`,\n    p99: `${(histogram.percentile(99) / 1e6).toFixed(2)}ms`,\n    max: `${(histogram.max / 1e6).toFixed(2)}ms`,\n  });\n  histogram.reset();\n}, 5000);\n```\n\n2. **Production Thresholds:**\n- **Healthy:** p99 delay < 10ms.\n- **Degraded:** p99 delay 20ms\u201350ms.\n- **Critical:** p99 delay > 100ms. At this level, HTTP requests are queuing in the TCP backlog and health checks will begin failing.",
+    "pitfalls": "Using `setInterval` with `Date.now()` to measure event loop lag. `setInterval` itself is subject to timer drift; `monitorEventLoopDelay` uses high-resolution hardware timers in libuv.",
+    "key_takeaway": "Use `perf_hooks.monitorEventLoopDelay` to measure p99 event loop lag with nanosecond accuracy."
+  },
+  {
+    "id": "node-039",
+    "title": "Microtask Queue Order: Promise.then vs queueMicrotask vs process.nextTick",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "Predict the exact execution order of this code:\n```javascript\nPromise.resolve().then(() => console.log('promise'));\nqueueMicrotask(() => console.log('queueMicrotask'));\nprocess.nextTick(() => console.log('nextTick'));\nsetImmediate(() => console.log('setImmediate'));\nconsole.log('synchronous');\n```",
+    "question": "What is the exact execution order, why does `process.nextTick` prioritize over standard ECMAScript microtasks (`Promise.then` and `queueMicrotask`), and why does `setImmediate` run last?",
+    "hints": [
+      "Synchronous code runs first.",
+      "Node maintains two distinct microtask queues: the `nextTickQueue` and the standard `microtaskQueue`."
+    ],
+    "answer": "1. **Exact Output:**\n```text\nsynchronous\nnextTick\npromise\nqueueMicrotask\nsetImmediate\n```\n\n2. **The Mechanics:**\n1. **Synchronous:** `console.log('synchronous')` executes immediately on the main call stack.\n2. **nextTickQueue:** When the call stack empties, Node first processes its internal `nextTickQueue`. `process.nextTick` runs **before any Promise callbacks**.\n3. **microtaskQueue:** After the `nextTickQueue` is completely drained, Node processes the standard V8 microtask queue (resolving `Promise.then` and `queueMicrotask` in FIFO order).\n4. **Event Loop Check Phase:** Once all microtasks are exhausted, the event loop advances to the Check phase and executes `setImmediate`.",
+    "pitfalls": "Assuming `queueMicrotask` and `process.nextTick` are identical. `process.nextTick` has higher priority in Node.js.",
+    "key_takeaway": "`nextTick` runs before Promise microtasks, and all microtasks run before event loop phases (`setImmediate`)."
+  },
+  {
+    "id": "node-040",
+    "title": "Core Dumps, Linux gdb & Post-Mortem Debugging of V8 Hard Crashes",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Advanced",
+    "scenario": "A production Node.js service crashes abruptly with `Segmentation fault (core dumped)`. There are no JavaScript stack traces, no unhandled rejection logs, and the process died instantly with exit code 139.",
+    "question": "How do you enable Linux core dumps in Kubernetes/Docker, and how do you use `gdb` and the `llnode` plugin to inspect the C++ stack and recover the exact JavaScript line that caused the crash?",
+    "hints": [
+      "Segmentation faults occur in native C++ addons or V8 engine internals, bypassing JavaScript error handlers.",
+      "`llnode` is an LLDB/GDB plugin that translates C++ V8 heap memory into JavaScript source frames."
+    ],
+    "answer": "1. **Why Segfaults Bypass Node.js:**\nA `SIGSEGV` (exit code 139) is emitted by the Linux kernel when native code (a C++ addon or V8 bug) attempts to access unmapped memory. The process terminates immediately at the OS level without running any JavaScript catch handlers.\n\n2. **Enabling Core Dumps:**\n- Set core file size to unlimited: `ulimit -c unlimited`.\n- Configure core pattern on host: `echo \"/var/crash/core.%e.%p\" > /proc/sys/kernel/core_pattern`.\n\n3. **Post-Mortem Analysis with llnode:**\nLoad the core dump into LLDB with the `llnode` plugin:\n```bash\nlldb node -c /var/crash/core.node.12345\n(lldb) plugin load /usr/lib/llnode.so\n# View the JavaScript call stack at the moment of the crash:\n(lldb) v8 bt\n# Inspect local JavaScript variables in memory:\n(lldb) v8 inspect\n```",
+    "pitfalls": "Trying to catch segmentation faults with `try/catch` or `process.on('uncaughtException')`. The OS kernel kills the process before any code can run.",
+    "key_takeaway": "Diagnose native segmentation faults (SIGSEGV) using Linux core dumps and `llnode` with `gdb`/`lldb`."
   }
 ]
