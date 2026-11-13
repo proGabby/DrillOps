@@ -298,5 +298,305 @@
     "answer": "1. **Requests vs Limits:**\n- **Requests:** Used exclusively by `kube-scheduler` for placement decisions. Guarantees that the node has that amount of capacity reserved before scheduling the pod.\n- **Limits:** Enforced by the Linux kernel cgroups runtime on the node. The maximum ceiling the container is allowed to consume.\n\n2. **Over-limit Behavior:**\n- **CPU:** Compressible resource. Exceeding CPU limit results in CFS **throttling** (slow execution), never process termination.\n- **Memory:** Non-compressible resource. Exceeding memory **request** is allowed if the node has free buffer. But exceeding memory **limit** results in the Linux kernel invoking the OOM Killer and terminating the container with exit code 137 (`OOMKilled`).",
     "pitfalls": "Setting memory limits equal to memory requests on JVM or Node.js apps without tuning heap flags, causing frequent OOMKilled restarts during garbage collection spikes.",
     "key_takeaway": "Requests are for scheduling guarantees; limits are for kernel enforcement ceilings."
+  },
+  {
+    "id": "devops-021",
+    "title": "Kubernetes OOMKilled vs CrashLoopBackOff Mystery",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A stateful worker pod deployed on Kubernetes abruptly stops processing queue jobs every few hours. `kubectl get pods` displays `CrashLoopBackOff` with 12 restarts. However, checking `kubectl logs` displays no application stack traces or fatal error logs right before termination.",
+    "question": "What is the fastest command sequence to prove whether the Linux kernel invoked the OOM killer or Kubernetes terminated it due to failed liveness probes, and what is the key difference in remediation between the two?",
+    "hints": [
+      "Check `kubectl describe pod` under the `Last State` section and exit codes.",
+      "Exit code 137 indicates SIGKILL (128 + 9), which can be OOM or Kubernetes probe timeout."
+    ],
+    "answer": "1. Run `kubectl describe pod <pod-name>` and look at `Last State -> Terminated -> Reason` and `Exit Code`.\n- If `Reason: OOMKilled` (Exit Code 137), the container exceeded its `resources.limits.memory` or the node ran out of memory.\n- If `Reason: Error` or exit code 137/143 without OOMKilled, check `Events` at the bottom for failed liveness/readiness probes (e.g. `Liveness probe failed: HTTP probe failed with statuscode: 500` or timeout).\n\n2. Run `kubectl get pod <pod-name> -o jsonpath='{.status.containerStatuses[*].lastState.terminated}'` to view the exact termination payload.\n\n3. Remediation difference:\n- OOMKilled: Inspect application memory profiles (heap/buffers/goroutine leaks), optimize GC, or raise `limits.memory`.\n- Failed Probe: Adjust `initialDelaySeconds`, `timeoutSeconds`, or `failureThreshold` if the app was temporarily blocked by CPU saturation or slow external DB calls rather than genuinely dead.",
+    "pitfalls": "Many engineers blindly increase memory limits when seeing exit code 137, without realizing that a blocking liveness probe timeout also sends a SIGKILL after the termination grace period.",
+    "key_takeaway": "Exit Code 137 = Process killed with signal 9. Always verify `Reason: OOMKilled` in pod `Last State` before assuming it was a memory issue."
+  },
+  {
+    "id": "devops-022",
+    "title": "Kubernetes PodDisruptionBudgets (PDB) & Safe Node Draining",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "An automated cluster autoscaler or platform engineer drains an EC2 worker node with `kubectl drain node-1`. A mission-critical payment service deployed on that node drops 100% of customer checkout requests during the drain window.",
+    "question": "What is a PodDisruptionBudget (PDB), how does it protect services during voluntary disruptions, and why did the drain operation take down your payment pods?",
+    "hints": [
+      "Voluntary disruptions include node drains, cluster upgrades, and autoscaler scale-downs.",
+      "A PDB specifies the minimum number or percentage of pods that must stay available."
+    ],
+    "answer": "1. **What Happened:**\n`kubectl drain` evicts all pods on the specified node. If all replicas of your service are scheduled on that node (or if multiple nodes are drained in parallel) and no PDB exists, the eviction API terminates the pods without checking if replacement replicas are healthy yet on other nodes.\n\n2. **The Solution (PDB):**\nCreate a PodDisruptionBudget that prevents the eviction API from terminating pods below a safe threshold:\n```yaml\napiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: payment-service-pdb\nspec:\n  minAvailable: 1 # Or maxUnavailable: 1\n  selector:\n    matchLabels:\n      app: payment-service\n```\nWhen `kubectl drain` attempts to evict the pod, the Kubernetes API blocks the drain until replacement pods on other nodes have passed readiness checks.",
+    "pitfalls": "Setting `minAvailable: 100%` on a deployment, which prevents nodes from EVER being drained and deadlocks cluster upgrades.",
+    "key_takeaway": "Always deploy a PodDisruptionBudget alongside pod anti-affinity for production services."
+  },
+  {
+    "id": "devops-023",
+    "title": "Kubernetes QoS Classes: Guaranteed vs Burstable vs BestEffort Evictions",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A Kubernetes worker node experiences sudden memory pressure. Kubelet starts evicting pods to prevent the Linux kernel from crashing the node. Pod A is evicted immediately, while Pod B continues running.",
+    "question": "How does Kubernetes determine the Quality of Service (QoS) class of a pod, and in what strict order does the kubelet evict pods during memory or disk pressure?",
+    "hints": [
+      "QoS is not configured in a YAML field; it is computed from the relationship between requests and limits.",
+      "The three classes are Guaranteed, Burstable, and BestEffort."
+    ],
+    "answer": "1. **QoS Classes:**\n- **Guaranteed:** Every container in the pod has CPU and memory `requests` equal to `limits`.\n- **Burstable:** At least one container has a memory or CPU request, but limits are higher than requests (or limits are unset).\n- **BestEffort:** No container specifies any `requests` or `limits`.\n\n2. **Eviction Order under Node Pressure:**\nKubelet evicts pods based on their `oom_score_adj` in this exact order:\n1. **BestEffort pods** are evicted first.\n2. **Burstable pods** consuming memory above their requests are evicted next.\n3. **Guaranteed pods** are protected and evicted last, only if the node is still out of memory.",
+    "pitfalls": "Running production databases or payment gateways as BestEffort or under-requested Burstable pods, guaranteeing they are killed first during cluster spikes.",
+    "key_takeaway": "Mission-critical workloads should use Guaranteed QoS (`requests == limits`) to prevent kubelet evictions."
+  },
+  {
+    "id": "devops-024",
+    "title": "Kubernetes Init Containers vs Native Sidecar Containers",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "You have an Istio service mesh proxy container in your Pod. Before Kubernetes 1.28, your batch job pod completed its main task, but the Pod remained stuck in `Running` status forever because the proxy container never stopped.",
+    "question": "What is the difference between Init Containers, standard sidecars, and Kubernetes Native Sidecar Containers (`restartPolicy: Always`), and how does this fix job termination and startup ordering?",
+    "hints": [
+      "Init containers run sequentially to completion before main app containers start.",
+      "K8s 1.28 introduced `restartPolicy: Always` inside `initContainers`."
+    ],
+    "answer": "1. **The Classic Sidecar Flaw:**\nIn older Kubernetes versions, all containers in `spec.containers` started in parallel. If the main container needed an Envoy proxy or vault agent to be ready before calling APIs, it would crash. Worse, for batch `Jobs`, when the main container finished, the sidecar kept running forever, preventing the Job from completing.\n\n2. **Native Sidecar Containers (K8s 1.28+):**\nDefine the sidecar inside `initContainers` with `restartPolicy: Always`:\n```yaml\nspec:\n  initContainers:\n  - name: vault-agent\n    image: vault:1.15\n    restartPolicy: Always\n```\n- **Startup Order:** Starts before main containers and blocks startup until its startup probe passes.\n- **Job Termination:** When all regular containers in `spec.containers` exit, Kubernetes automatically terminates the native sidecar, allowing Jobs to succeed cleanly.",
+    "pitfalls": "Writing custom bash cleanup scripts to kill sidecars via localhost HTTP endpoints instead of using native sidecars.",
+    "key_takeaway": "Use native sidecar containers (`initContainers` with `restartPolicy: Always`) for proxies and secret sync agents."
+  },
+  {
+    "id": "devops-025",
+    "title": "Ephemeral Debug Containers & Troubleshooting Distroless Pods",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A production Go microservice built with `gcr.io/distroless/static` is failing to resolve an internal database DNS name. You run `kubectl exec -it <pod> -- sh` and receive: `exec: \"sh\": executable file not found in $PATH`.",
+    "question": "Why is `sh` missing in Distroless containers, and how do you use `kubectl debug` with an ephemeral container to troubleshoot the pod's network and process namespace without restarting it?",
+    "hints": [
+      "Distroless images contain only the compiled binary and zero shells or utilities.",
+      "`kubectl debug -it <pod> --image=nicolaka/netshoot --target=<container>` attaches to the pod's namespace."
+    ],
+    "answer": "1. **Why sh is Missing:**\nDistroless and Scratch images strip out shells, package managers, and standard Linux utilities to minimize attack surface and image size. While great for security, it makes `kubectl exec` impossible.\n\n2. **The Ephemeral Debug Solution:**\nUse Kubernetes Ephemeral Containers (`kubectl debug`) to inject a troubleshooting container containing full diagnostic tools into the live pod without restarting it:\n```bash\nkubectl debug -it my-pod \\\n  --image=nicolaka/netshoot \\\n  --target=my-app-container\n```\n`netshoot` shares the target pod's network namespace (`curl`, `dig`, `tcpdump`) and process namespace (`ps aux`, `strace`), allowing you to diagnose DNS and network issues live.",
+    "pitfalls": "Installing `curl` and `bash` into production images permanently just for debugging, violating least-privilege principles.",
+    "key_takeaway": "Never bloat production images with debug tools; use `kubectl debug` with ephemeral containers."
+  },
+  {
+    "id": "devops-026",
+    "title": "Rootless Containers & User Namespaces (userns)",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A multi-tenant SaaS platform allows users to build and run custom container workloads. An attacker uses a known Linux kernel vulnerability to escape the container's isolation boundaries.",
+    "question": "How do Linux User Namespaces (`userns`) map container UIDs to unprivileged host UIDs, and why does this prevent container breakouts from gaining root access on the underlying node?",
+    "hints": [
+      "UID 0 inside the container can be mapped to UID 100000 on the host.",
+      "Check `/etc/subuid` and `/etc/subgid`."
+    ],
+    "answer": "1. **The Flaw of Standard Containers:**\nWithout user namespaces, UID 0 inside a container is identical to UID 0 (root) on the host kernel. If an attacker exploits a kernel bug or mounts `/etc`, they are true root on the host.\n\n2. **How User Namespaces Work:**\nUser namespaces map a range of container UIDs to unprivileged host UIDs. For example:\n- Container UID 0 (root) maps to Host UID 100000.\n- Container UID 1000 maps to Host UID 101000.\n\nInside the container, processes believe they are root (`whoami` returns `root`) and can install packages. But if the process attempts to interact with host resources, the host kernel sees UID 100000 (a completely unprivileged user) and denies all root access.",
+    "pitfalls": "Assuming standard `USER nobody` is equivalent to user namespaces. If a root container breaks out without `userns`, it has full kernel root.",
+    "key_takeaway": "User namespaces map container root (UID 0) to unprivileged host UIDs, neutralizing container breakout attacks."
+  },
+  {
+    "id": "devops-027",
+    "title": "Terraform State Locking with DynamoDB & Drift Remediation",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "Two engineers on the platform team run `terraform apply` concurrently in CI. One job overwrites the other's state file in Amazon S3, destroying production RDS security groups.",
+    "question": "How does Terraform state locking work with DynamoDB, what causes state drift, and how do you recover from a stale lock error (`Error acquiring the state lock`) safely?",
+    "hints": [
+      "DynamoDB stores the lock ID with an MD5 hash of the running operation.",
+      "`terraform force-unlock` should only be used after verifying no CI runner is currently executing."
+    ],
+    "answer": "1. **State Locking Mechanics:**\nWhen using an AWS S3 backend, Terraform requires a DynamoDB table with a primary partition key `LockID`. Before executing `plan` or `apply`, Terraform acquires a distributed lock in DynamoDB. Concurrent executions fail with `Error acquiring the state lock`.\n\n2. **Recovering from Stale Locks:**\nIf a CI job crashes or is killed mid-run, the lock remains in DynamoDB:\n```bash\n# 1. Verify no process or CI runner is actively running\n# 2. Force-unlock using the Lock ID printed in the error\nterraform force-unlock <LOCK-ID>\n```\n\n3. **State Drift:**\nWhen resources are modified manually in the cloud console outside Terraform, run `terraform plan -refresh-only` to reconcile the state without destroying resources.",
+    "pitfalls": "Running `terraform force-unlock` while a team member's `terraform apply` is actively creating cloud resources, corrupting the state file.",
+    "key_takeaway": "Always back S3 Terraform state with a DynamoDB lock table to prevent concurrent corruption."
+  },
+  {
+    "id": "devops-028",
+    "title": "Zero-Downtime TLS: Cert-Manager, ACME Rate Limits & DNS-01",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "Your team uses `cert-manager` with Let's Encrypt `HTTP-01` validation for internal staging and production services. An internal service behind a corporate VPN fails to renew its certificate, and Let's Encrypt starts returning `429 Too Many Requests`.",
+    "question": "Why does `HTTP-01` validation fail for internal/private services, how does `DNS-01` solve it, and how do you protect against Let's Encrypt rate limits?",
+    "hints": [
+      "`HTTP-01` requires Let's Encrypt validation servers on the public internet to reach port 80 of your ingress.",
+      "`DNS-01` validates ownership by creating a TXT record in your DNS provider (e.g. Route53, Cloudflare)."
+    ],
+    "answer": "1. **HTTP-01 vs DNS-01:**\n- **HTTP-01 Challenge:** Let's Encrypt validates domain control by sending an HTTP GET request to `http://<domain>/.well-known/acme-challenge/<token>`. If your service is behind a private VPN or firewall, Let's Encrypt cannot reach port 80 and validation fails.\n- **DNS-01 Challenge:** Cert-manager uses IAM credentials to create a temporary `_acme-challenge.<domain>` TXT record in your DNS provider (e.g. AWS Route53 or Cloudflare). Because validation happens at the DNS level, the service can be completely private.\n\n2. **Rate Limits:**\nLet's Encrypt limits renewals to 50 certificates per registered domain per week. Always use the **Let's Encrypt Staging ACME server** in dev/test clusters to avoid hitting production rate limits.",
+    "pitfalls": "Testing cert-manager manifests against Let's Encrypt production API in CI, exhausting domain rate limits for 7 days.",
+    "key_takeaway": "Use DNS-01 validation for private/internal services and wildcard certificates."
+  },
+  {
+    "id": "devops-029",
+    "title": "GitOps Secrets: SealedSecrets vs SOPS vs External Secrets Operator",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A security auditor discovers raw base64-encoded Kubernetes Secret YAML files committed to your team's Git repository. Base64 is not encryption.",
+    "question": "Compare SealedSecrets, Mozilla SOPS, and External Secrets Operator (ESO) for managing secrets in a GitOps repository.",
+    "hints": [
+      "SealedSecrets uses asymmetric encryption where only the controller in the cluster has the private key.",
+      "External Secrets Operator synchronizes secrets from cloud vaults (AWS Secrets Manager, HashiCorp Vault)."
+    ],
+    "answer": "1. **GitOps Secret Approaches:**\n- **SealedSecrets (Bitnami):** Uses asymmetric cryptography. Developers encrypt secrets using a public key (`kubeseal`). The resulting `SealedSecret` custom resource is safe to commit to Git. Only the controller running inside the target cluster holds the private key to decrypt it into a Kubernetes Secret.\n- **Mozilla SOPS:** Encrypts secret values inside YAML files using AWS KMS, GCP KMS, or PGP keys. Requires CI/CD or ArgoCD plugins to decrypt during deployment.\n- **External Secrets Operator (ESO - Industry Standard):** Git contains only an `ExternalSecret` manifest pointing to a secret name in AWS Secrets Manager, GCP Secret Manager, or HashiCorp Vault. ESO fetches the secret directly from the cloud vault at runtime.",
+    "pitfalls": "Committing standard Kubernetes Secrets to private Git repos thinking base64 is secure. Anyone with read access can run `echo <val> | base64 -d`.",
+    "key_takeaway": "Use External Secrets Operator (ESO) to sync credentials from cloud vaults into Kubernetes without storing secrets in Git."
+  },
+  {
+    "id": "devops-030",
+    "title": "Event-Driven Autoscaling with KEDA vs Standard HPA",
+    "domain": "DevOps & Containers",
+    "difficulty": "Intermediate-Advanced",
+    "scenario": "A background worker microservice consumes messages from an Amazon SQS queue. CPU utilization stays low (~10%), but queue depth surges to 500,000 unhandled messages. The standard Kubernetes HPA fails to scale up the pods.",
+    "question": "Why does standard Kubernetes HPA fail to autoscale event-driven message consumers, and how does KEDA (Kubernetes Event-driven Autoscaling) scale pods from 0 to N based on queue depth?",
+    "hints": [
+      "Standard HPA only monitors CPU and Memory metrics out of the box.",
+      "Worker pods doing I/O or waiting on messages often consume almost zero CPU."
+    ],
+    "answer": "1. **The HPA Limitation:**\nStandard Kubernetes Horizontal Pod Autoscaler (HPA) evaluates CPU and memory metrics from the Metrics Server. A worker pulling messages and making database calls is typically I/O bound with low CPU usage. It will not scale up even as queue backlog explodes.\n\n2. **The KEDA Solution:**\nKEDA installs custom metric scalers that query external message brokers (SQS, Kafka, RabbitMQ, Redis Streams):\n```yaml\napiVersion: keda.sh/v1alpha1\nkind: ScaledObject\nmetadata:\n  name: sqs-worker-scaler\nspec:\n  scaleTargetRef:\n    name: sqs-worker\n  minReplicaCount: 0 # Scales to 0 when queue is empty!\n  maxReplicaCount: 50\n  triggers:\n  - type: aws-sqs-queue\n    metadata:\n      queueURL: https://sqs.us-east-1.amazonaws.com/123/my-queue\n      queueLength: '100' # Scale 1 pod per 100 messages\n```\nKEDA also enables scale-to-zero when queues are idle, saving substantial cloud compute costs.",
+    "pitfalls": "Scaling queue workers on CPU utilization instead of queue depth, resulting in massive processing lag.",
+    "key_takeaway": "Use KEDA to scale background workers based on queue depth and message latency rather than CPU."
+  },
+  {
+    "id": "devops-031",
+    "title": "ArgoCD / GitOps Out-of-Sync Loop on Dynamic Fields",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "After deploying a deployment manifest via ArgoCD, the application stays indefinitely in `OutOfSync` status or flaps between `Synced` and `OutOfSync`, despite no new commits in the Git repository.",
+    "question": "What common Kubernetes mutation mechanisms cause GitOps controllers to detect infinite drift, and how do you configure ArgoCD to ignore these dynamic fields without disabling automated sync?",
+    "hints": [
+      "Mutating admission webhooks (like Linkerd/Istio sidecars, or HPA replica counts) modify resources after Git commits them.",
+      "ArgoCD has an `ignoreDifferences` spec."
+    ],
+    "answer": "1. **Root Cause:**\nDynamic or mutated fields in live cluster state that are not tracked in Git. The two most common culprits:\n- **HorizontalPodAutoscaler (HPA):** HPA mutates `spec.replicas` on the Deployment. Git specifies `replicas: 3`, but HPA scales it to `10`. ArgoCD sees `3 != 10` and attempts to revert it.\n- **Mutating Admission Webhooks:** Injected sidecars (Istio, Datadog), default service account tokens, or injected annotations.\n\n2. **Solution (ignoreDifferences):**\nIn the ArgoCD `Application` manifest or global `argocd-cm` configmap, add `ignoreDifferences`:\n\n```yaml\nspec:\n  ignoreDifferences:\n  - group: apps\n    kind: Deployment\n    jsonPointers:\n    - /spec/replicas\n```\nAnd in the Deployment manifest in Git, omit `spec.replicas` altogether so HPA owns scaling.",
+    "pitfalls": "Setting `replicas: 1` in Git while running an HPA causes ArgoCD and HPA to fight continuously, creating pod thrashing in production.",
+    "key_takeaway": "Never define static `replicas` in Git when using HPA, and use `ignoreDifferences` for admission-controller mutations."
+  },
+  {
+    "id": "devops-032",
+    "title": "Linux Cgroups v2 & CFS CPU Throttling: Requests vs Limits",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "An API service in Kubernetes has `limits.cpu: 1000m` (1 core). Monitoring shows average CPU utilization is only 35%. However, p99 request latency degrades from 20ms to 850ms, and Prometheus reports high `container_cpu_cfs_throttled_periods_total`.",
+    "question": "How does the Linux Completely Fair Scheduler (CFS) enforce CPU quotas across time periods (e.g. 100ms), why does multithreading trigger aggressive throttling under low average CPU, and should you set CPU limits in production?",
+    "hints": [
+      "CFS quota slices CPU time into 100ms periods (`cpu.cfs_period_us`).",
+      "A service running 8 concurrent threads can burn 100ms of CPU quota in just 12.5ms."
+    ],
+    "answer": "1. **CFS Quota Mechanics:**\nLinux cgroups enforce CPU limits using the Completely Fair Scheduler (CFS) based on a time window (default 100ms = 100,000 microseconds). A limit of `1000m` grants 100ms of CPU run time every 100ms window.\n\nIf a service (like Node.js worker pool, Go, or Java) runs across 8 worker threads simultaneously, the threads consume quota concurrently: 8 threads * 12.5ms = 100ms of quota burned! For the remaining 87.5ms of the period, the Linux kernel **completely freezes (throttles) all process execution**. To Prometheus, average CPU appears as only 35%, but the app is frozen for 80% of every second.\n\n2. **Industry Best Practice:**\nMany engineering organizations (including Zalando, Buffer, and Google) enforce **no CPU limits** (`limits.cpu: unset`), relying strictly on `requests.cpu` to guarantee baseline scheduling and CPU shares without synthetic kernel latency penalties.",
+    "pitfalls": "Setting strict CPU limits on multithreaded applications and wondering why p99 latency degrades while CPU graphs look low.",
+    "key_takeaway": "CFS CPU limits cause severe tail latency due to quota exhaustion; avoid CPU limits or set them with generous headroom."
+  },
+  {
+    "id": "devops-033",
+    "title": "Kubernetes NetworkPolicies: Default Deny & CNI Architecture",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A security audit requires zero-trust network isolation between Kubernetes namespaces. You apply a `NetworkPolicy` to a namespace, but pods continue to communicate freely across all namespaces.",
+    "question": "Why do NetworkPolicies fail to enforce on default cloud clusters (like basic AWS EKS or vanilla clusters), and how do you write a Default-Deny Ingress and Egress policy that allows CoreDNS lookups?",
+    "hints": [
+      "Kubernetes NetworkPolicies are only enforced if the installed CNI plugin (e.g. Calico, Cilium, AWS VPC CNI with network policy enabled) supports policy enforcement.",
+      "A Default-Deny Egress policy will break DNS resolution unless UDP/TCP port 53 to kube-system is explicitly allowed."
+    ],
+    "answer": "1. **CNI Enforcement Requirement:**\nNetworkPolicy resources are pure API declarations. If your cluster uses a CNI without policy enforcement enabled (e.g. vanilla AWS VPC CNI without policy engine, or flannel), the rules are completely ignored by the kernel.\n\n2. **Default Deny with DNS Allowed:**\n```yaml\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: default-deny-all\nspec:\n  podSelector: {}\n  policyTypes:\n  - Ingress\n  - Egress\n  egress:\n  # Allow DNS resolution to CoreDNS\n  - to:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: kube-system\n    ports:\n    - protocol: UDP\n      port: 53\n    - protocol: TCP\n      port: 53\n```",
+    "pitfalls": "Applying `policyTypes: [Egress]` without allowing port 53. Every pod in the namespace immediately fails DNS resolution and drops all external API connections.",
+    "key_takeaway": "NetworkPolicies require a policy-capable CNI; always whitelist CoreDNS (port 53) when configuring default-deny egress."
+  },
+  {
+    "id": "devops-034",
+    "title": "Kube-Proxy Modes: iptables vs IPVS vs eBPF (Cilium) at Scale",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "Your Kubernetes cluster scales to 1,500 nodes and 25,000 Services. Node CPU usage jumps to 90% in kernel space, and adding or removing a single Service causes cluster-wide network packet drops for several seconds.",
+    "question": "Why does `kube-proxy` in `iptables` mode degrade to O(N) sequential packet evaluation at scale, and how do IPVS (IP Virtual Server) and eBPF (Cilium) achieve O(1) packet routing without iptables lock contention?",
+    "hints": [
+      "iptables rules are evaluated sequentially in the kernel for every packet.",
+      "eBPF hooks directly into the Linux socket layer and network device drivers."
+    ],
+    "answer": "1. **The iptables O(N) Bottleneck:**\nIn `iptables` mode, `kube-proxy` writes a linear list of iptables rules for every Service and Endpoint. When a cluster has 25,000 Services, every incoming packet must sequentially traverse tens of thousands of rules (O(N) complexity). Furthermore, whenever a single pod restarts, the entire iptables rule table must be regenerated and locked using `iptables-restore`, creating global lock contention.\n\n2. **IPVS (O(1)):**\nUses Linux kernel IP Virtual Server with hash tables. Looking up a service endpoint is O(1) regardless of whether you have 10 or 50,000 services.\n\n3. **eBPF (Cilium / Calico eBPF):**\nBypasses the Linux network stack and iptables entirely. eBPF bytecode attaches directly to network interface drivers (XDP) and socket layers (`sock_ops`), routing packets directly from client sockets to target pod veth interfaces with minimum CPU overhead.",
+    "pitfalls": "Running standard iptables kube-proxy in large clusters (>1,000 nodes), causing kernel lockups during autoscaling events.",
+    "key_takeaway": "Replace iptables kube-proxy with IPVS or eBPF (Cilium) at scale for O(1) service routing."
+  },
+  {
+    "id": "devops-035",
+    "title": "Container Hardening: Linux Capabilities, Read-Only RootFS & Seccomp",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A container running in production is attacked via a zero-day vulnerability. The attacker attempts to install malicious binary packages and modify `/etc/shadow`.",
+    "question": "How do you configure a Kubernetes `securityContext` to enforce a read-only root filesystem, drop all Linux kernel capabilities, and enforce the default seccomp profile?",
+    "hints": [
+      "`readOnlyRootFilesystem: true` prevents writing to any path not explicitly mounted as a volume.",
+      "`capabilities: drop: ['ALL']` removes dangerous syscall permissions like raw sockets or network configuration."
+    ],
+    "answer": "1. **Hardened securityContext:**\n```yaml\nspec:\n  securityContext:\n    runAsNonRoot: true\n    runAsUser: 10001\n    runAsGroup: 10001\n    seccompProfile:\n      type: RuntimeDefault\n  containers:\n  - name: app\n    securityContext:\n      allowPrivilegeEscalation: false\n      readOnlyRootFilesystem: true\n      capabilities:\n        drop:\n        - ALL\n    volumeMounts:\n    # Mount an ephemeral tmpfs only for required writable scratch paths\n    - name: tmp\n      mountPath: /tmp\n```\n- `readOnlyRootFilesystem: true`: Any attempt to write or overwrite system binaries fails with `Read-only file system`.\n- `drop: ['ALL']`: Prevents privilege escalation and administrative kernel operations.\n- `RuntimeDefault` seccomp: Restricts dangerous Linux system calls.",
+    "pitfalls": "Enabling `readOnlyRootFilesystem: true` without mounting a writable `emptyDir` on `/tmp`, causing applications like Node.js or Java that need temp lockfiles to crash on boot.",
+    "key_takeaway": "Hardened containers drop ALL Linux capabilities, run as non-root, and enforce read-only root filesystems."
+  },
+  {
+    "id": "devops-036",
+    "title": "Kubernetes Gateway API vs Ingress NGINX: Role-Oriented Design",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "Your enterprise organization has 40 development teams. Developers frequently edit the shared Ingress NGINX annotations to add custom rewrites or timeouts, accidentally breaking routing for other teams and overriding cluster-wide security policies.",
+    "question": "Why was the Kubernetes Gateway API created to replace the legacy Ingress spec, and how does its role-oriented separation of concerns (`GatewayClass`, `Gateway`, `HTTPRoute`) prevent multi-tenant configuration collisions?",
+    "hints": [
+      "Legacy Ingress merged infrastructure provisioning and route matching into a single unstructured YAML with non-portable annotations.",
+      "Gateway API splits roles between Infrastructure Provider, Cluster Operator, and Application Developer."
+    ],
+    "answer": "1. **Legacy Ingress Limitations:**\nIngress was a monolithic specification. Advanced features (canary deployments, header routing, timeouts, rate limiting) were never standardized, forcing vendors to rely on brittle, conflicting vendor-specific annotations (`nginx.ingress.kubernetes.io/...`). In multi-tenant clusters, developers could easily break shared ingress controllers.\n\n2. **Gateway API Role Separation:**\n- **GatewayClass (Cloud/Infra Provider):** Defines the infrastructure type (e.g. AWS Envoy Gateway, GKE Gateway).\n- **Gateway (Cluster Operator/Platform Team):** Defines listeners, ports (80/443), TLS certificates, and allowed route namespaces.\n- **HTTPRoute / GRPCRoute (Application Developer):** Developers define only their service routing logic (`matches`, `rules`, `filters`) attached to the platform team's Gateway without permission to touch TLS certs or global port bindings.",
+    "pitfalls": "Relying on fragile vendor-specific Ingress annotations across different cloud providers, preventing multi-cloud portability.",
+    "key_takeaway": "Gateway API decouples infrastructure ownership from application routing, preventing multi-tenant collisions."
+  },
+  {
+    "id": "devops-037",
+    "title": "Kubernetes Service Types & ExternalName CNAME Injection Risks",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A development team uses a Kubernetes `ExternalName` service to alias an external database hostname `prod-db.internal.company.com`. A malicious internal actor deploys an ExternalName service in their namespace pointing to an external attacker-controlled domain.",
+    "question": "How do `ExternalName` services work at the CoreDNS level, what security risks do they introduce for traffic hijacking and CNAME spoofing, and how do you restrict them?",
+    "hints": [
+      "`ExternalName` returns a DNS CNAME record rather than a virtual cluster IP.",
+      "Kubernetes Gateways and Ingress controllers can be tricked into routing internal traffic to external endpoints."
+    ],
+    "answer": "1. **How ExternalName Works:**\nUnlike ClusterIP or NodePort, an `ExternalName` service has no selector and allocates no cluster IP or proxy endpoints. CoreDNS simply returns a CNAME record pointing directly to the external hostname (e.g. `my-service.my-ns.svc.cluster.local -> external-host.com`).\n\n2. **Security Vulnerabilities:**\n- **DNS Spoofing & SSRF:** An attacker with namespace access can redirect internal service names to external servers to intercept unencrypted internal HTTP requests.\n- **Ingress Hijacking (CVE-2021-25740):** Ingress-NGINX historically allowed ExternalName services to point to external IP addresses, allowing attackers to access internal cloud metadata services (`169.254.169.254`).\n\n3. **Remediation:**\nDisable ExternalName services in Ingress controllers (`--enable-annotation-validation`), and restrict ExternalName creation via Open Policy Agent (OPA) / Kyverno admission controllers.",
+    "pitfalls": "Assuming all Kubernetes Services proxy traffic through kube-proxy; ExternalName is pure DNS redirection.",
+    "key_takeaway": "ExternalName returns raw CNAMEs; restrict it with admission policies to prevent internal traffic hijacking."
+  },
+  {
+    "id": "devops-038",
+    "title": "CoreDNS Scaling, Conntrack Table Exhaustion & 5-Second DNS Timeouts",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "During peak traffic surges in an AWS EKS cluster, microservices intermittently experience mysterious 5.000-second request timeouts when resolving internal service names.",
+    "question": "What Linux kernel race condition between `conntrack` and UDP DNS lookups causes the infamous 5-second DNS delay, and how do NodeLocal DNSCache and CoreDNS autoscaling resolve it?",
+    "hints": [
+      "The glibc resolver sends A and AAAA queries concurrently over UDP; Linux conntrack can drop one due to race conditions.",
+      "The default glibc DNS timeout is 5 seconds before retrying."
+    ],
+    "answer": "1. **The 5-Second DNS Race:**\nStandard Linux `glibc` sends IPv4 (A) and IPv6 (AAAA) DNS queries concurrently from the same socket over UDP. When both queries traverse Linux NAT (iptables / conntrack), they race to insert new entries with identical source IP/port tuples into the kernel's `conntrack` table. The kernel drops the second packet as an insert collision. Glibc waits for its default timeout of **5.000 seconds** before retrying.\n\n2. **The Fix:**\n- **Deploy NodeLocal DNSCache:** Runs a lightweight DNS caching agent on every worker node as a DaemonSet using a dummy interface. Pods query local node cache via TCP/UDP without hitting conntrack NAT rules.\n- **Single-Request Options:** In pod `dnsConfig.options`, configure `single-request-reopen` or `ndots: 2` to prevent concurrent A/AAAA collisions and reduce redundant search domain iterations.",
+    "pitfalls": "Increasing CoreDNS replica count thinking CoreDNS is overloaded. The 5s delay is a Linux kernel netfilter/conntrack race condition on the client node.",
+    "key_takeaway": "Deploy NodeLocal DNSCache to eliminate the Linux kernel conntrack race that causes 5-second DNS timeouts."
+  },
+  {
+    "id": "devops-039",
+    "title": "Linux Namespaces, Cgroups & Pivot_Root: The Anatomy of a Container",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "A Senior Platform Engineer is asked during an interview: 'Containers do not actually exist as real objects in the Linux kernel. What actually happens under the hood when a container runtime starts a container?'",
+    "question": "Explain the 7 core Linux kernel primitives that construct a container (PID, NET, MNT, IPC, UTS, USER, Cgroups), and how `pivot_root` changes the root filesystem securely compared to `chroot`.",
+    "hints": [
+      "Namespaces isolate what you can see; Cgroups isolate what you can use.",
+      "`chroot` can be escaped by changing directories relative to a file descriptor, while `pivot_root` swaps the mount table."
+    ],
+    "answer": "1. **The 7 Linux Kernel Primitives:**\n- **pid namespace:** Isolates process IDs. The container process becomes PID 1 inside, while remaining PID 45920 on host.\n- **net namespace:** Isolates network interfaces, IP addresses, routing tables, and port bindings.\n- **mnt namespace:** Isolates filesystem mount points.\n- **ipc namespace:** Isolates System V IPC and POSIX message queues/shared memory.\n- **uts namespace:** Isolates hostname and domain name (`my-pod-xyz`).\n- **user namespace:** Maps container UIDs to unprivileged host UIDs.\n- **cgroups (Control Groups):** Enforces resource boundaries (CPU quotas, memory limits, blkio, pids limits).\n\n2. **pivot_root vs chroot:**\n`chroot` only changes the apparent root directory for the current process. An unprivileged root process can easily escape `chroot` by opening a directory handle outside the root (`open('../..')`) and calling `fchdir`. In contrast, `pivot_root` actually detaches the old root filesystem mount and mounts the new root, making breakout impossible without kernel exploits.",
+    "pitfalls": "Believing containers are hypervisors with guest kernels. Containers are ordinary host processes restricted by kernel namespaces and cgroups.",
+    "key_takeaway": "Containers are simply ordinary Linux processes constrained by Namespaces (isolation) and Cgroups (resource limits)."
+  },
+  {
+    "id": "devops-040",
+    "title": "Multi-Cluster GitOps & Disaster Recovery: Active-Active Traffic Failover",
+    "domain": "DevOps & Containers",
+    "difficulty": "Advanced",
+    "scenario": "Your organization operates two identical Kubernetes clusters across two separate AWS regions (`us-east-1` and `eu-west-1`) for disaster recovery. Region 1 suffers a catastrophic regional outage.",
+    "question": "How do you architect an Active-Active multi-cluster GitOps delivery pipeline with ExternalDNS, Anycast/Route53 routing, and cross-cluster state synchronization to achieve sub-60-second recovery time objective (RTO)?",
+    "hints": [
+      "Application manifests must be synced identically across clusters using an umbrella GitOps repo.",
+      "Global traffic management requires latency/health-check-based DNS routing or Anycast IP frontends."
+    ],
+    "answer": "1. **GitOps Multi-Cluster Topology:**\nUse an ArgoCD ApplicationSet or centralized Hub-and-Spoke cluster. The ApplicationSet targets both clusters simultaneously using cluster generators, guaranteeing exact image tags, manifests, and secrets across both regions.\n\n2. **Automated Traffic Failover:**\n- **ExternalDNS:** Each cluster runs ExternalDNS, annotating Ingress/Gateway endpoints with health check IDs.\n- **AWS Route53 / Cloudflare Traffic Steering:** Configured with Failover or Latency-based Routing with Active Health Checks against `/healthz`. If Region 1 stops responding to health probes, DNS automatically redirects 100% of global traffic to Region 2 within 30 seconds.\n\n3. **State & Database Replication:**\nCompute is stateless. Storage relies on multi-region Aurora Global Database (sub-second storage replication) or DynamoDB Global Tables, allowing Region 2 to immediately serve read/write traffic with near-zero RTO.",
+    "pitfalls": "Trying to run distributed databases across WAN without dedicated replication topology, causing split-brain or massive cross-region latency.",
+    "key_takeaway": "Active-Active multi-cluster requires GitOps ApplicationSets for uniform compute and automated DNS health-check failover for traffic."
   }
 ]
