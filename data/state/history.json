@@ -6,7 +6,8 @@
     "node-001",
     "sre-001",
     "sre-002",
-    "tool-001"
+    "tool-001",
+    "tool-002"
   ],
   "history": [
     {
@@ -43,6 +44,11 @@
       "drill_id": "tool-001",
       "domain": "Tools",
       "completed_at": "2026-11-13T14:38:54.314Z"
+    },
+    {
+      "drill_id": "tool-002",
+      "domain": "Tools",
+      "completed_at": "2026-11-13T23:36:23.030Z"
     }
   ]
 }
