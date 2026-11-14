@@ -7,7 +7,8 @@
     "sre-001",
     "sre-002",
     "tool-001",
-    "tool-002"
+    "tool-002",
+    "arch-001"
   ],
   "history": [
     {
@@ -49,6 +50,11 @@
       "drill_id": "tool-002",
       "domain": "Tools",
       "completed_at": "2026-11-13T23:36:23.030Z"
+    },
+    {
+      "drill_id": "arch-001",
+      "domain": "Architecture",
+      "completed_at": "2026-11-14T13:36:21.383Z"
     }
   ]
 }
