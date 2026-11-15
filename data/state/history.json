@@ -9,7 +9,8 @@
     "tool-001",
     "tool-002",
     "arch-001",
-    "arch-002"
+    "arch-002",
+    "inc-001"
   ],
   "history": [
     {
@@ -61,6 +62,11 @@
       "drill_id": "arch-002",
       "domain": "Architecture",
       "completed_at": "2026-11-14T22:27:45.512Z"
+    },
+    {
+      "drill_id": "inc-001",
+      "domain": "Incident Triage",
+      "completed_at": "2026-11-15T13:58:51.881Z"
     }
   ]
 }
