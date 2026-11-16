@@ -11,7 +11,8 @@
     "arch-001",
     "arch-002",
     "inc-001",
-    "inc-002"
+    "inc-002",
+    "devops-001"
   ],
   "history": [
     {
@@ -73,6 +74,11 @@
       "drill_id": "inc-002",
       "domain": "Incident Triage",
       "completed_at": "2026-11-15T22:51:29.983Z"
+    },
+    {
+      "drill_id": "devops-001",
+      "domain": "DevOps & Containers",
+      "completed_at": "2026-11-16T15:52:56.342Z"
     }
   ]
 }
