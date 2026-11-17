@@ -12,7 +12,8 @@
     "arch-002",
     "inc-001",
     "inc-002",
-    "devops-001"
+    "devops-001",
+    "go-004"
   ],
   "history": [
     {
@@ -79,6 +80,11 @@
       "drill_id": "devops-001",
       "domain": "DevOps & Containers",
       "completed_at": "2026-11-16T15:52:56.342Z"
+    },
+    {
+      "drill_id": "go-004",
+      "domain": "Backend with Go",
+      "completed_at": "2026-11-17T16:05:11.394Z"
     }
   ]
 }
