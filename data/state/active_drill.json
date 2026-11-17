@@ -1,1 +1,25 @@
-null
+{
+  "date": "2026-11-17",
+  "topic": {
+    "key": "golang",
+    "name": "Backend with Go",
+    "file": "golang.json"
+  },
+  "question": {
+    "id": "go-004",
+    "title": "Goroutines & sync.WaitGroup Race Pitfall",
+    "domain": "Backend with Go",
+    "difficulty": "Beginner",
+    "scenario": "A developer writes concurrent code to process a list of 10 IDs:\n```go\nvar wg sync.WaitGroup\nfor _, id := range ids {\n    go func(id int) {\n        wg.Add(1)\n        defer wg.Done()\n        fetch(id)\n    }(id)\n}\nwg.Wait()\n```\nOccasionally, the program exits before all IDs have been fetched, or crashes with a negative counter.",
+    "question": "Why is calling `wg.Add(1)` inside the spawned goroutine a severe concurrency bug, and where must `wg.Add()` be invoked?",
+    "hints": [
+      "Goroutine scheduling is asynchronous and not guaranteed to start immediately.",
+      "`wg.Wait()` can be reached on the main thread before any child goroutine has executed `wg.Add(1)`."
+    ],
+    "answer": "1. **The Race Condition:**\nWhen `go func()` is invoked, the Go runtime allocates the goroutine and places it on a run queue. It does **not** execute synchronously on the current CPU thread. \n\nIf the main thread finishes iterating through `ids` before the Go scheduler context-switches to any child goroutine, the main thread reaches `wg.Wait()`. Because `wg.Add(1)` has not yet executed, the counter is `0`, and `wg.Wait()` exits immediately, terminating the program before the workers even start.\n\n2. **The Fix:**\nAlways call `wg.Add(1)` in the **spawning thread** before launching the goroutine:\n```go\nvar wg sync.WaitGroup\nfor _, id := range ids {\n    wg.Add(1) // Call in parent thread BEFORE launching\n    go func(id int) {\n        defer wg.Done()\n        fetch(id)\n    }(id)\n}\nwg.Wait()\n```",
+    "pitfalls": "Passing `sync.WaitGroup` to functions by value (`func worker(wg sync.WaitGroup)`), which copies the internal counter and creates a permanent deadlock.",
+    "key_takeaway": "Always call `wg.Add()` in the parent goroutine before spawning child workers."
+  },
+  "aiMockLog": "Alert: `id-processor` service exited prematurely after processing",
+  "sentAt": "2026-11-17T01:52:30.523Z"
+}
