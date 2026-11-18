@@ -1,1 +1,25 @@
-null
+{
+  "date": "2026-11-18",
+  "topic": {
+    "key": "nodejs",
+    "name": "Node.js Backend & Libuv",
+    "file": "nodejs.json"
+  },
+  "question": {
+    "id": "node-002",
+    "title": "Synchronous vs Asynchronous I/O (fs vs fs.promises)",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Beginner",
+    "scenario": "An API reads a 20 MB configuration file on every incoming request using `fs.readFileSync('config.json')`. Under 200 requests/sec, the server's throughput drops to near zero and latency spikes to 4 seconds.",
+    "question": "What is the architectural difference between `fs.readFileSync` and `fs.promises.readFile`, and how does libuv handle asynchronous file operations under the hood?",
+    "hints": [
+      "`readFileSync` halts the main thread until the disk returns data.",
+      "`readFile` offloads disk I/O to libuv's background thread pool, freeing the main thread."
+    ],
+    "answer": "1. **Sync vs Async File I/O:**\n- **`fs.readFileSync`:** Blocks the main JavaScript thread completely while the operating system reads bytes from the physical disk into kernel memory and copies them to user space. During this disk read, no other JavaScript or HTTP request can run.\n- **`fs.promises.readFile`:** The main thread registers an asynchronous work task with **libuv**. Libuv dispatches the blocking disk read to its internal **thread pool** (default 4 threads). The main JavaScript thread is instantly free to process other incoming HTTP requests. Once the file is read, libuv pushes the callback/promise resolution to the event loop.\n\n2. **The Fix:**\n```javascript\nimport fs from 'node:fs/promises';\n\n// Non-blocking asynchronous read\nconst data = await fs.readFile('config.json', 'utf8');\n```",
+    "pitfalls": "Using synchronous methods (`fs.existsSync`, `fs.writeFileSync`) in request handlers. They are only acceptable during initial application startup before the server starts listening.",
+    "key_takeaway": "Always use `node:fs/promises` in request paths to keep the event loop non-blocking."
+  },
+  "aiMockLog": "P0 Alert: `api-service-",
+  "sentAt": "2026-11-18T00:58:51.120Z"
+}
