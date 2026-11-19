@@ -14,7 +14,8 @@
     "inc-002",
     "devops-001",
     "go-004",
-    "node-002"
+    "node-002",
+    "sre-003"
   ],
   "history": [
     {
@@ -91,6 +92,11 @@
       "drill_id": "node-002",
       "domain": "Node.js Backend & Libuv",
       "completed_at": "2026-11-18T15:43:45.668Z"
+    },
+    {
+      "drill_id": "sre-003",
+      "domain": "SRE",
+      "completed_at": "2026-11-19T15:48:35.136Z"
     }
   ]
 }
