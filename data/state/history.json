@@ -16,7 +16,8 @@
     "go-004",
     "node-002",
     "sre-003",
-    "tool-003"
+    "tool-003",
+    "tool-004"
   ],
   "history": [
     {
@@ -103,6 +104,11 @@
       "drill_id": "tool-003",
       "domain": "Tools",
       "completed_at": "2026-11-20T15:30:24.023Z"
+    },
+    {
+      "drill_id": "tool-004",
+      "domain": "Tools",
+      "completed_at": "2026-11-20T23:59:48.720Z"
     }
   ]
 }
