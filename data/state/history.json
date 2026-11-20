@@ -15,7 +15,8 @@
     "devops-001",
     "go-004",
     "node-002",
-    "sre-003"
+    "sre-003",
+    "tool-003"
   ],
   "history": [
     {
@@ -97,6 +98,11 @@
       "drill_id": "sre-003",
       "domain": "SRE",
       "completed_at": "2026-11-19T15:48:35.136Z"
+    },
+    {
+      "drill_id": "tool-003",
+      "domain": "Tools",
+      "completed_at": "2026-11-20T15:30:24.023Z"
     }
   ]
 }
