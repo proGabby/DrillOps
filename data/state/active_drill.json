@@ -1,1 +1,25 @@
-null
+{
+  "date": "2026-11-20",
+  "topic": {
+    "key": "tools",
+    "name": "Tools & Observability",
+    "file": "tools.json"
+  },
+  "question": {
+    "id": "tool-003",
+    "title": "Linux Storage & Disk Usage: df -h vs du -sh and Deleted Open Files",
+    "domain": "Tools",
+    "difficulty": "Beginner",
+    "scenario": "A Linux database server alerts on 100% disk usage (`/dev/sda1` is full). The engineer deletes a 50GB log file with `rm /var/log/app.log`. However, `df -h` still reports the disk as 100% full, while `du -sh /var/log` shows disk usage has dropped by 50GB.",
+    "question": "Why do `df -h` and `du -sh` show conflicting disk usage? Why did `rm` fail to free disk space, and how do you release the storage without restarting the server?",
+    "hints": [
+      "`du` walks the filesystem directory tree; `df` queries filesystem superblock allocation tables.",
+      "If a running process still has a file open, `rm` deletes the directory entry (dentry), but the kernel keeps the disk blocks allocated until the process closes the file descriptor."
+    ],
+    "answer": "1. Why `df -h` and `du -sh` Disagree:\n- `du` (Disk Usage): Walks the filesystem directory tree from the specified path, summing up the sizes of existing directory entries (dentries).\n- `df` (Disk Free): Queries the filesystem superblock directly to check total allocated vs free blocks.\n\n2. Why `rm` Did Not Free the Space:\nIn Linux, deleting a file with `rm` only removes its directory link (dentry). If a running process (e.g., application or syslog) still holds an open file descriptor pointing to the file's inode, the kernel retains the underlying disk blocks. `du` can no longer find the file in the directory tree (reporting low usage), but `df` reports the blocks as still allocated!\n\n3. How to Release the Storage:\n- Find the process holding the deleted file descriptor:\n  `sudo lsof +L1` (shows open files with link count = 0) or `sudo lsof | grep deleted`.\n- Truncate the file via `/proc` without restarting the process:\n  `echo '' > /proc/<PID>/fd/<FD_NUMBER>`\n  This zeroes out the file content and immediately frees the disk blocks in `df` while the application continues running uninterrupted.",
+    "pitfalls": "Deleting active log files with `rm` instead of truncating them (`> file.log` or `truncate -s 0 file.log`); rebooting servers needlessly to reclaim deleted file blocks.",
+    "key_takeaway": "`rm` does not free disk blocks if a running process holds the file open. Identify them with `lsof | grep deleted` and truncate via `/proc/<pid>/fd/<fd>`."
+  },
+  "aiMockLog": "`ALERT: db-prod-01 /dev/sda1 is 100% full.` An engineer",
+  "sentAt": "2026-11-20T00:39:16.766Z"
+}
