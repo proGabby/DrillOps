@@ -17,7 +17,8 @@
     "node-002",
     "sre-003",
     "tool-003",
-    "tool-004"
+    "tool-004",
+    "arch-003"
   ],
   "history": [
     {
@@ -109,6 +110,11 @@
       "drill_id": "tool-004",
       "domain": "Tools",
       "completed_at": "2026-11-20T23:59:48.720Z"
+    },
+    {
+      "drill_id": "arch-003",
+      "domain": "Architecture",
+      "completed_at": "2026-11-21T14:43:18.533Z"
     }
   ]
 }
