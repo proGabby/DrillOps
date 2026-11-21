@@ -18,7 +18,8 @@
     "sre-003",
     "tool-003",
     "tool-004",
-    "arch-003"
+    "arch-003",
+    "arch-004"
   ],
   "history": [
     {
@@ -115,6 +116,11 @@
       "drill_id": "arch-003",
       "domain": "Architecture",
       "completed_at": "2026-11-21T14:43:18.533Z"
+    },
+    {
+      "drill_id": "arch-004",
+      "domain": "Architecture",
+      "completed_at": "2026-11-21T23:21:08.654Z"
     }
   ]
 }
