@@ -19,7 +19,8 @@
     "tool-003",
     "tool-004",
     "arch-003",
-    "arch-004"
+    "arch-004",
+    "inc-003"
   ],
   "history": [
     {
@@ -121,6 +122,11 @@
       "drill_id": "arch-004",
       "domain": "Architecture",
       "completed_at": "2026-11-21T23:21:08.654Z"
+    },
+    {
+      "drill_id": "inc-003",
+      "domain": "Incident Triage",
+      "completed_at": "2026-11-22T14:38:44.175Z"
     }
   ]
 }
