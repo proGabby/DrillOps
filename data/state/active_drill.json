@@ -1,1 +1,25 @@
-null
+{
+  "date": "2026-11-25",
+  "topic": {
+    "key": "nodejs",
+    "name": "Node.js Backend & Libuv",
+    "file": "nodejs.json"
+  },
+  "question": {
+    "id": "node-003",
+    "title": "Callbacks vs Promises vs Async/Await & Try/Catch Traps",
+    "domain": "Node.js Backend & Libuv",
+    "difficulty": "Beginner",
+    "scenario": "A developer writes the following asynchronous function:\n```javascript\nasync function getUser(id) {\n  try {\n    setTimeout(() => { throw new Error('DB connection failed'); }, 100);\n  } catch (err) {\n    console.log('Caught error:', err.message);\n  }\n}\n```\nWhen run, the `try/catch` block fails to catch the error, and the entire Node.js application crashes with an unhandled exception.",
+    "question": "Why can a `try/catch` block never catch an exception thrown inside a standard asynchronous callback, and how do Promises and `async/await` fix error propagation?",
+    "hints": [
+      "`setTimeout` schedules the callback to run in a future event loop tick, long after the `try/catch` stack frame has exited.",
+      "Promises preserve error state across event loop ticks via `.catch()` and `await`."
+    ],
+    "answer": "1. **Stack Frame Mismatch:**\nA `try/catch` block only catches synchronous exceptions thrown on the **current call stack**. When `setTimeout` is called, it registers a timer and `getUser` finishes executing. Its call stack frame is destroyed immediately.\n\n100ms later, the timer fires on a completely fresh, isolated call stack in the event loop's Timers phase. When the callback throws, there is no enclosing `try/catch` frame above it, resulting in an unhandled exception that crashes the process.\n\n2. **The Promise Solution:**\nPromises encapsulate asynchronous operations and store rejection states that can be caught across event loop ticks:\n```javascript\nfunction delayError() {\n  return new Promise((_, reject) => {\n    setTimeout(() => reject(new Error('DB connection failed')), 100);\n  });\n}\n\nasync function getUser(id) {\n  try {\n    await delayError(); // Suspends execution and catches rejection properly!\n  } catch (err) {\n    console.log('Caught error:', err.message);\n  }\n}\n```",
+    "pitfalls": "Mixing raw callbacks with `async/await` and expecting `try/catch` to magically intercept errors across callback boundaries.",
+    "key_takeaway": "Async/await unwraps Promise rejections synchronously into `try/catch`; raw callback errors cannot be caught by surrounding `try/catch`."
+  },
+  "aiMockLog": "**Alert:** `user-api` service on `production",
+  "sentAt": "2026-11-25T02:31:59.814Z"
+}
