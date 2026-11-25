@@ -23,7 +23,8 @@
     "inc-003",
     "inc-004",
     "devops-002",
-    "go-005"
+    "go-005",
+    "node-003"
   ],
   "history": [
     {
@@ -145,6 +146,11 @@
       "drill_id": "go-005",
       "domain": "Backend with Go",
       "completed_at": "2026-11-24T17:50:58.895Z"
+    },
+    {
+      "drill_id": "node-003",
+      "domain": "Node.js Backend & Libuv",
+      "completed_at": "2026-11-25T17:17:34.701Z"
     }
   ]
 }
