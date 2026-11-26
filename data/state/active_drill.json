@@ -1,1 +1,25 @@
-null
+{
+  "date": "2026-11-26",
+  "topic": {
+    "key": "sre",
+    "name": "Site Reliability Engineering (SRE)",
+    "file": "sre.json"
+  },
+  "question": {
+    "id": "sre-004",
+    "title": "Core Reliability Metrics: MTTR, MTTD, MTBF, and MTTF",
+    "domain": "SRE",
+    "difficulty": "Beginner",
+    "scenario": "During a quarterly engineering review, executives want to measure team incident performance. The VP asks for a dashboard tracking MTTR, MTTD, and MTBF. A new team member asks how these metrics relate to each other and where engineering effort produces the highest ROI.",
+    "question": "Define MTTR, MTTD, MTBF, and MTTF. Why do modern SRE practices prioritize minimizing MTTR and MTTD over maximizing MTBF in complex distributed systems?",
+    "hints": [
+      "MTTD = Mean Time to Detect; MTTR = Mean Time to Resolve / Recover; MTBF = Mean Time Between Failures.",
+      "In microservices, components will inevitably fail continuously; resilience is about rapid containment and recovery, not preventing every failure."
+    ],
+    "answer": "1. Definitions:\n   - MTTD (Mean Time to Detect): Time between the onset of an incident and when the engineering team becomes aware (automated alert fires).\n   - MTTR (Mean Time to Resolve / Recover): Time between incident detection (or onset) and full service restoration.\n   - MTBF (Mean Time Between Failures): Average operational uptime between consecutive incidents (MTBF = MTTF + MTTR).\n   - MTTF (Mean Time to Failure): Expected operational lifespan of a non-repairable component before it breaks.\n\n2. Why Prioritize MTTR and MTTD over MTBF:\nIn complex distributed systems, failure is mathematically inevitable (hardware dies, network partitions occur, third-party APIs fail). Trying to achieve infinite MTBF (zero failures) is economically impossible and halts feature velocity.\nModern SRE accepts that failure happens continuously and focuses on:\n- Minimizing MTTD: Immediate automated anomaly detection via SLO burn-rate alerts.\n- Minimizing MTTR: Fast rollbacks, automated traffic draining, circuit breakers, and canary analysis.\nSystems designed for low MTTR recover from outages in seconds rather than hours.",
+    "pitfalls": "Focusing solely on preventing all failures (maximizing MTBF) which leads to bureaucratic change approval boards and delayed releases, instead of building resilient self-healing infrastructure.",
+    "key_takeaway": "Failures in distributed systems are inevitable. Modern SRE optimizes for fast detection (low MTTD) and rapid recovery (low MTTR) through automation and fast rollbacks."
+  },
+  "aiMockLog": "ALERT: Service `payment-gateway-api` experienced",
+  "sentAt": "2026-11-26T01:47:22.923Z"
+}
