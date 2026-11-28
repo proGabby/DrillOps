@@ -1,1 +1,25 @@
-null
+{
+  "date": "2026-11-28",
+  "topic": {
+    "key": "architecture",
+    "name": "Distributed Architecture",
+    "file": "architecture.json"
+  },
+  "question": {
+    "id": "arch-005",
+    "title": "Load Balancers: Layer 4 (Transport) vs Layer 7 (Application) Routing",
+    "domain": "Architecture",
+    "difficulty": "Beginner",
+    "scenario": "A company wants to route web traffic. One engineer proposes using an AWS Network Load Balancer (NLB - Layer 4), while another proposes an Application Load Balancer (ALB - Layer 7) to route `/api/users` to the User Service and `/api/checkout` to the Checkout Service.",
+    "question": "What is the fundamental difference between Layer 4 (TCP/UDP) and Layer 7 (HTTP/HTTPS) load balancing? Which OSI layer is required for path-based routing, header inspection, and TLS termination?",
+    "hints": [
+      "Layer 4 routes raw TCP packets based on IP and Port without decrypting or looking inside packet payloads.",
+      "Layer 7 terminates HTTP/HTTPS, inspects URLs, headers, and cookies, enabling content-based routing."
+    ],
+    "answer": "1. Layer 4 Load Balancing (Transport Layer - TCP/UDP):\n- How It Works: Operates on IP addresses and TCP/UDP ports. It does NOT inspect application data or decrypt HTTP/TLS payloads.\n- Routing Decision: Directs raw packet streams based solely on source/destination IP, source/destination port, and TCP handshake.\n- Performance: Blazing-fast throughput and ultra-low microsecond latency. Can handle tens of millions of packets per second with minimal CPU (e.g., AWS NLB, Linux IPVS, HAProxy in TCP mode).\n- Limitations: Cannot inspect HTTP headers, cannot parse URL paths (`/api/v1`), cannot inspect cookies, and cannot perform path-based routing.\n\n2. Layer 7 Load Balancing (Application Layer - HTTP/HTTPS/gRPC):\n- How It Works: Acts as a full reverse proxy. Terminates the client TCP connection, decrypts TLS/SSL, and parses the full HTTP request (method, URI path, headers, cookies, payload).\n- Capabilities:\n  - Path-based & Host-based routing (e.g., routing `api.domain.com/v1/auth` to Auth pods and `/billing` to Billing pods).\n  - Cookie-based sticky sessions.\n  - Header manipulation, rate limiting, and web application firewall (WAF) integration.\n- Performance: Higher latency and CPU overhead than L4 due to TLS decryption and HTTP string parsing (e.g., Nginx, Envoy, AWS ALB).",
+    "pitfalls": "Attempting to do path-based routing (`/api/*`) on a Layer 4 load balancer; using heavy Layer 7 load balancers for raw streaming TCP/gaming protocols where microsecond latency is critical.",
+    "key_takeaway": "Layer 4 routes raw TCP/UDP packets by IP/Port with ultra-high throughput; Layer 7 terminates TLS and inspects HTTP paths, headers, and cookies for smart application routing."
+  },
+  "aiMockLog": "Alert: HTTP 404 errors observed for",
+  "sentAt": "2026-11-28T01:28:20.886Z"
+}
